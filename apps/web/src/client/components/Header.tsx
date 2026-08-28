@@ -14,6 +14,7 @@ export function Header() {
         />
         <span className="text-lg font-semibold text-base-content">ew-o1</span>
       </a>
+      <div id="header-center" className="flex-1 flex justify-center" />
       <div className="ml-auto">
         <ThemeSwitcher />
       </div>

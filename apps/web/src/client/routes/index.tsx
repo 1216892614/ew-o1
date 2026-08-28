@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, Notebook } from "@phosphor-icons/react";
 import { trpc } from "@/client/lib/trpc";
@@ -27,6 +27,7 @@ type ModalState =
   | { mode: "edit"; notebook: NotebookItem };
 
 function HomePage() {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
   const [modalState, setModalState] = useState<ModalState>({ mode: "closed" });
   const isArchived = activeTab === "archived";
@@ -115,6 +116,7 @@ function HomePage() {
                   icon={notebook.icon ?? "notebook"}
                   fileCount={notebook.fileCount ?? 0}
                   updatedAt={notebook.updatedAt}
+                  onClick={() => navigate({ to: "/notebook/$id", params: { id: notebook.id } })}
                   onMenuClick={() => setModalState({ mode: "edit", notebook })}
                 />
               ))}

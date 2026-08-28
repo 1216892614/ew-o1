@@ -8,6 +8,7 @@ interface NotebookCardProps {
   icon: string;
   fileCount: number;
   updatedAt: Date;
+  onClick: () => void;
   onMenuClick: () => void;
 }
 
@@ -38,10 +39,17 @@ export function NotebookCard({
   icon,
   fileCount,
   updatedAt,
+  onClick,
   onMenuClick,
 }: NotebookCardProps) {
   return (
-    <div className="card bg-base-200 hover:bg-base-300 transition-colors cursor-pointer border border-base-300 hover:border-primary/30 group">
+    <div
+      className="card bg-base-200 hover:bg-base-300 transition-colors cursor-pointer border border-base-300 hover:border-primary/30 group"
+      onClick={onClick}
+      onKeyDown={(e) => e.key === "Enter" && onClick()}
+      role="button"
+      tabIndex={0}
+    >
       <div className="card-body p-5 gap-3">
         <div className="flex items-start gap-3">
           <div
