@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="EW-O1 Logo" width="128" height="128" />
+</p>
+
 # Electronic Writer 01 (ew-o1)
 
 一个类 NotebookLM 的 AI 写作工具，特化用于尼尔·盖曼的「园丁法」(Gardening Method) 创作流程。
