@@ -4,8 +4,14 @@ import type { HonoCtxEnv } from "@/shared/types";
 
 export default function themeGet(c: Context<HonoCtxEnv>) {
   const cookieTheme = getCookie(c, "ew-theme");
-  const theme = cookieTheme === "light" ? "light" : "dark";
-  setCookie(c, "ew-theme", theme, { path: "/", sameSite: "Lax" });
+  // "system" | "light" | "dark"; default to system
+  const stored = cookieTheme === "light" || cookieTheme === "dark" ? cookieTheme : "system";
+  // For SSR class, system defaults to dark (client will correct on hydration)
+  const resolvedClass = stored === "light" ? "light" : "dark";
+
+  if (!cookieTheme) {
+    setCookie(c, "ew-theme", "system", { path: "/", sameSite: "Lax" });
+  }
 
   return [
     <div key="theme" className="size-0 opacity-0 overflow-hidden pointer-events-none">
@@ -13,10 +19,10 @@ export default function themeGet(c: Context<HonoCtxEnv>) {
         value="light"
         type="checkbox"
         id="ew-theme-controller"
-        defaultChecked={theme === "light"}
+        defaultChecked={stored === "light"}
         className="theme-controller"
       />
     </div>,
-    theme,
+    resolvedClass,
   ] as const;
 }

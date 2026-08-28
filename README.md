@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="EW-O1 Logo" width="128" height="128" />
+  <img src="docs/logo.png" alt="ew-o1 logo" width="128" height="128" />
 </p>
 
 # Electronic Writer 01 (ew-o1)

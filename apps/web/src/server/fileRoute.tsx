@@ -41,7 +41,7 @@ export async function fileRoute(c: Context<HonoCtxEnv>) {
               name="viewport"
               content="width=device-width, initial-scale=1"
             />
-            <title>EW-O1</title>
+            <title>ew-o1</title>
             <link rel="icon" href="/favicon.ico" sizes="48x48" />
             <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
             <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
