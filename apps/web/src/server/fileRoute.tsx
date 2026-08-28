@@ -3,6 +3,7 @@ import {
   renderRouterToStream,
   RouterServer,
 } from "@tanstack/react-router/ssr/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import clsx from "clsx";
 import type { Context } from "hono";
 import {
@@ -12,6 +13,7 @@ import {
   ViteClient,
 } from "vite-ssr-components/react";
 import { createRouter } from "@/client/router";
+import { trpc, trpcClient } from "@/client/lib/trpc";
 import type { HonoCtxEnv } from "@/shared/types";
 import themeGet from "./utils/themeGet";
 
@@ -24,6 +26,17 @@ export async function fileRoute(c: Context<HonoCtxEnv>) {
   const [themeEl, theme] = themeGet(c);
 
   c.header("Content-Type", "text/html");
+
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 1000 * 60,
+        gcTime: 1000 * 60 * 5,
+        retry: 0,
+        refetchOnWindowFocus: false,
+      },
+    },
+  });
 
   const res = handler(({ request, responseHeaders, router }) => {
     return renderRouterToStream({
@@ -53,7 +66,11 @@ export async function fileRoute(c: Context<HonoCtxEnv>) {
           </head>
           <body className="bg-base-100 text-base-content">
             <div id="root">
-              <RouterServer router={router} />
+              <trpc.Provider client={trpcClient} queryClient={queryClient}>
+                <QueryClientProvider client={queryClient}>
+                  <RouterServer router={router} />
+                </QueryClientProvider>
+              </trpc.Provider>
             </div>
             {themeEl}
           </body>
