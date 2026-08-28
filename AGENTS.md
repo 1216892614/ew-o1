@@ -62,27 +62,58 @@ tag = "笔记"
 ```
 
 - **File Panel**: 目录树，每个文件有 active switch 控制是否注入当前会话上下文。支持批量勾选/反选、拖拽排序。
-- **Agent Chat**: 中心区域，持久化 agent 对话。使用 TanStack AI 驱动服务端 agent loop，客户端用 ai-elements 渲染消息流和工具调用。
+- **Agent Chat**: 中心区域，持久化 agent 对话。服务端 TanStack AI `generate()` + tool loop，客户端 TanStack Virtual 虚拟滚动 + Streamdown 流式 Markdown 渲染。
 - **Monaco Editor**: 右侧按需展开，编辑选中文件。
 
 ## 技术栈
 
 | 层 | 选型 | 说明 |
 |---|---|---|
-| 服务端 AI | `@tanstack/ai` + adapters | agent loop, tool calling, streaming |
-| 客户端 AI UI | `ai-elements` (shadcn registry) | 仅 UI 组件（消息、工具调用渲染），数据层接 `@tanstack/ai-react` |
+| 服务端 AI | `@tanstack/ai` + adapters | `generate()`, tool calling, `maxIterations` agent loop |
+| 流式 Markdown | `streamdown` | 流式 Markdown 渲染，支持代码高亮、数学公式 |
+| 虚拟滚动 | `@tanstack/react-virtual` | 对话消息列表虚拟化 |
 | 前端框架 | React 19 + TanStack Router | SPA, file-based routing |
+| 数据请求 | `@tanstack/react-query` + tRPC | 类型安全 RPC + 缓存 |
 | 样式 | Tailwind CSS 4 + daisyUI 5 | utility-first + component classes |
 | 拖拽 | `@dnd-kit/core` + `@dnd-kit/sortable` | 文件排序、批量操作 |
 | 编辑器 | `@monaco-editor/react` | 文件内容编辑 |
 | 状态管理 | jotai | atom-based, 无 Context |
-| 前后端通讯 | tRPC | 类型安全 RPC |
 | ORM | drizzle-orm (D1 adapter) | schema + migrations |
 | 存储 | Cloudflare R2 | 文件持久化主载体 |
 | 数据库 | Cloudflare D1 | 热缓存 + 元数据 |
 | RAG | Cloudflare AI Search | 文件全文检索、语义搜索 |
 | 网页阅读 | Cloudflare Browser Rendering | markdown 模式 |
 | 运行时 | Cloudflare Workers | Hono server |
+
+### AI 架构说明
+
+```
+客户端                              服务端
+─────────────────────              ──────────────────────
+React + jotai 状态                  @tanstack/ai
+  TanStack Virtual (消息列表)         generate()
+  Streamdown (流式 md 渲染)           tools + maxIterations
+              ←─── SSE ───→          adapter (openai/anthropic/...)
+```
+
+- **服务端**: `@tanstack/ai` 的 `generate()` + `tools` + `maxIterations` 实现 agent loop，通过 SSE 流式返回
+- **客户端**: 自定义 SSE 消费 → jotai atoms 管理消息状态 → TanStack Virtual 虚拟滚动 → Streamdown 渲染 markdown
+- **API Gateway**: TanStack AI adapters 统一多模型接入 (`@tanstack/ai-openai`, `@tanstack/ai-anthropic` 等)
+
+### 已安装 Skills
+
+| Skill | 用途 | 路径 |
+|-------|------|------|
+| `tanstack-ai` | 服务端 agent loop | `.agents/skills/tanstack-ai/` |
+| `tanstack-virtual` | 虚拟滚动 | `.agents/skills/tanstack-virtual/` |
+| `tanstack-query` | 数据请求 + 缓存 | `.agents/skills/tanstack-query/` |
+| `streamdown` | 流式 Markdown 渲染 | `.agents/skills/streamdown/` |
+| `trpc` | 类型安全 RPC | `.agents/skills/trpc/` |
+| `daisyui` | UI 组件库 | `.agents/skills/daisyui/` |
+| `jotai` | 状态管理 | `.agents/skills/jotai/` |
+| `tanstack-router` | 路由 | `.agents/skills/tanstack-router/` |
+
+**规则**: 实现前必须加载对应 skill，查阅 API 签名。不自造已有 skill 覆盖的功能。
 
 ## Agent 工具定义
 
@@ -238,8 +269,11 @@ R2 路径结构见「核心概念」章节。D1 作为热缓存层：
 - **Icons**: `@phosphor-icons/react` — 禁止手写 svg
 - **Tooltip**: `react-tooltip` (非 daisyUI)
 - **Toast**: `react-hot-toast`
-- AI 客户端组件: 优先使用 `ai-elements` registry 组件
-- AI 服务端: 使用 `@tanstack/ai` generate + tools，不自造 agent loop
+- AI 服务端: `@tanstack/ai` generate + tools（查阅 `.agents/skills/tanstack-ai/`）
+- 流式渲染: `streamdown`（查阅 `.agents/skills/streamdown/`）
+- 虚拟滚动: `@tanstack/react-virtual`（查阅 `.agents/skills/tanstack-virtual/`）
+- 数据请求: tRPC + `@tanstack/react-query`（查阅 `.agents/skills/trpc/`, `.agents/skills/tanstack-query/`）
+- **实现前必须加载对应 skill** — 不确定 API 签名时先读 skill 文档，禁止凭记忆编造
 
 ## 开发流程
 
