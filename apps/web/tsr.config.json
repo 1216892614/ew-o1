@@ -1,0 +1,11 @@
+{
+  "routeFileIgnorePattern": ".*/__tests__/.*",
+  "routesDirectory": "./src/client/routes",
+  "generatedRouteTree": "./src/client/routeTree.gen.ts",
+  "routeTreeFileHeader": [
+    "// biome-ignore-all lint: gen",
+    "/* eslint-disable */",
+    "// @ts-nocheck"
+  ],
+  "autoCodeSplitting": true
+}

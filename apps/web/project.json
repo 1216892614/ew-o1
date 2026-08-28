@@ -1,0 +1,27 @@
+{
+  "targets": {
+    "lint": {
+      "command": "npx @biomejs/biome lint {projectRoot}"
+    },
+    "build": {
+      "command": "pnpm run build",
+      "options": {
+        "cwd": "{projectRoot}"
+      }
+    },
+    "deploy": {
+      "command": "npx wrangler deploy",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": ["build"]
+    },
+    "versions-upload": {
+      "command": "npx wrangler versions upload",
+      "options": {
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": ["build"]
+    }
+  }
+}

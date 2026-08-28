@@ -1,0 +1,10 @@
+packages:
+  - "apps/*"
+  - "libs/*"
+allowBuilds:
+  '@swc/core': true
+  esbuild: true
+  nx: true
+  workerd: true
+overrides:
+  jiti: "2.6.1"

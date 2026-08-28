@@ -1,0 +1,46 @@
+"$schema" = "node_modules/wrangler/config-schema.json"
+
+name = "ew-o1"
+compatibility_date = "2025-06-02"
+main = "./src/main.tsx"
+compatibility_flags = ["nodejs_compat_v2"]
+account_id = "3244c8f91cd34317ce18652158e5853a"
+workers_dev = true
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+head_sampling_rate = 1
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ew-d1"
+database_id = "e37fe27b-761b-4b79-b1bd-b46e5ebd0323"
+migrations_dir = "../../drizzle"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "ew-r2"
+
+# Workers AI (embeddings, generation, etc.)
+[ai]
+binding = "AI"
+remote = true
+
+[[ai_search_namespaces]]
+binding = "AI_SEARCH"
+namespace = "default"
+remote = true
+
+[browser]
+binding = "BROWSER"
+
+[vars]
+CF_AI_GATEWAY_ID = "ew-ai-gateway"
+
+# Secrets (set via `wrangler secret put`):
+# BIGBIGDOG_AI_KEY, DEEPSEEK_AI_KEY
+

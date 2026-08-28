@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": [
+      "vite/client",
+      "./worker-configuration.d.ts",
+      "@cloudflare/workers-types/experimental"
+    ],
+    "jsx": "react-jsx",
+    "jsxImportSource": "react"
+  }
+}

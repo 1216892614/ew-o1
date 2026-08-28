@@ -1,0 +1,13 @@
+export * from "./schema";
+export * as schema from "./schema";
+
+import type { D1Database } from "@cloudflare/workers-types";
+import { drizzle } from "drizzle-orm/d1";
+import * as schema from "./schema";
+
+export default function db(d1: D1Database) {
+  return drizzle(d1, { schema });
+}
+
+/** The Drizzle ORM instance returned by the default db factory. */
+export type Database = ReturnType<typeof db>;

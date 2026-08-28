@@ -1,0 +1,36 @@
+{
+  "name": "ew-o1",
+  "version": "1.0.0",
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "dev": "pnpm --filter web run dev",
+    "build": "nx run-many --target=build",
+    "lint": "biome check",
+    "deploy": "pnpm --filter web run deploy",
+    "drizzle": "drizzle-kit"
+  },
+  "workspaces": [
+    "apps/*",
+    "libs/*"
+  ],
+  "dependencies": {
+    "drizzle-orm": "^0.45.1",
+    "drizzle-zod": "^0.8.3",
+    "wrangler": "^4.107.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.8",
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@nx/vite": "^22.6.0",
+    "@nx/web": "^22.6.0",
+    "@types/node": "^25.5.0",
+    "@vitest/ui": "^4.1.0",
+    "drizzle-kit": "^0.31.10",
+    "nx": "^22.6.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.1",
+    "vitest": "^4.1.0"
+  }
+}
