@@ -1,9 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
+import { createPortal } from "react-dom";
+import { PencilSimple } from "@phosphor-icons/react";
 import { Provider as JotaiProvider } from "jotai";
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, pointerWithin } from "@dnd-kit/core";
 import { trpc } from "@/client/lib/trpc";
-import { NotebookPageHeader } from "@/client/components/notebook/NotebookPageHeader";
 import { NotesSidebar } from "@/client/components/notebook/NotesSidebar";
 import { AgentChat } from "@/client/components/notebook/AgentChat";
 import { EditorPanel } from "@/client/components/notebook/EditorPanel";
@@ -96,13 +97,22 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
     >
-      <div className="flex flex-col flex-1 overflow-hidden">
-        <NotebookPageHeader
-          notebook={notebook}
-          onEditMeta={() => setShowMetaModal(true)}
-        />
+      {document.getElementById("header-center") &&
+        createPortal(
+          <button
+            type="button"
+            onClick={() => setShowMetaModal(true)}
+            className="flex items-center gap-1.5 cursor-pointer hover:text-primary transition-colors"
+          >
+            <span className="font-semibold text-sm truncate max-w-xs">
+              {notebook.name}
+            </span>
+            <PencilSimple size={14} className="text-base-content/50" />
+          </button>,
+          document.getElementById("header-center")!,
+        )}
 
-        <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden">
           {/* Left: Notes Sidebar */}
           <div className="w-80 border-r border-base-300 flex flex-col overflow-hidden">
             <NotesSidebar notebookId={notebookId} />
@@ -126,7 +136,6 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
             <EditorPanel notebookId={notebookId} />
           </div>
         </div>
-      </div>
 
       <DragOverlay>
         {draggedNoteIds.length > 0 && (
