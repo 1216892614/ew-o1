@@ -10,6 +10,8 @@ import {
   CaretRight,
   ArrowsDownUp,
   Tray,
+  FolderPlus,
+  NotePencil,
 } from "@phosphor-icons/react";
 import {
   DndContext,
@@ -48,7 +50,7 @@ interface Category {
   notebookId: string;
   name: string;
   position: number;
-  isArchive: boolean;
+  isArchive: boolean | null;
   createdAt: Date;
 }
 
@@ -58,17 +60,17 @@ interface NotesSidebarProps {
 
 function relativeTime(date: Date): string {
   const now = Date.now();
-  const then = date.getTime();
-  const diffMs = now - then;
-  const diffSec = Math.floor(diffMs / 1000);
-  if (diffSec < 60) return "just now";
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffDay < 30) return `${diffDay}d ago`;
-  return date.toLocaleDateString();
+  const diffMs = now - date.getTime();
+  const diffMinutes = Math.floor(diffMs / 60_000);
+  if (diffMinutes < 1) return "刚刚";
+  if (diffMinutes < 60) return `${diffMinutes}分钟前`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}小时前`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 30) return `${diffDays}天前`;
+  const diffMonths = Math.floor(diffDays / 30);
+  if (diffMonths < 12) return `${diffMonths}个月前`;
+  return `${Math.floor(diffMonths / 12)}年前`;
 }
 
 function SortableNoteItem({
@@ -88,12 +90,13 @@ function SortableNoteItem({
   onOpen: (id: string) => void;
   inArchiveCategory: boolean;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition } =
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: note.id });
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
+    opacity: isDragging ? 0.5 : 1,
   };
 
   return (
@@ -102,11 +105,15 @@ function SortableNoteItem({
       style={style}
       {...attributes}
       {...listeners}
-      className={`px-3 py-2 flex items-center gap-2 hover:bg-base-200 rounded cursor-pointer ${
+      className={`flex items-center gap-2 px-3 py-2 hover:bg-base-200 rounded cursor-pointer mx-1 ${
         isOpened ? "bg-base-200" : ""
       }`}
       onClick={() => onOpen(note.id)}
+      onKeyDown={(e) => e.key === "Enter" && onOpen(note.id)}
+      role="button"
+      tabIndex={0}
     >
+      {/* Checkbox */}
       <input
         type="checkbox"
         className="checkbox checkbox-xs"
@@ -117,12 +124,17 @@ function SortableNoteItem({
         }}
         onClick={(e) => e.stopPropagation()}
       />
+
+      {/* Name + metadata */}
       <div className="flex-1 min-w-0">
         <div className="text-sm font-medium truncate">{note.name}</div>
-        <div className="text-xs text-base-content/50">
-          {relativeTime(note.updatedAt)} · {note.wordCount ?? 0} words
+        <div className="text-xs text-base-content/50 flex gap-2">
+          <span>{relativeTime(note.updatedAt)}</span>
+          <span>{note.wordCount ?? 0}字</span>
         </div>
       </div>
+
+      {/* Active toggle */}
       <input
         type="checkbox"
         className="toggle toggle-xs toggle-primary"
@@ -143,10 +155,11 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
   const setOpenedNoteId = useSetAtom(openedNoteIdAtom);
 
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
-    new Set(["__uncategorized__"]),
+    new Set(["__archived__"]),
   );
-  const [isAdding, setIsAdding] = useState(false);
-  const [newNoteName, setNewNoteName] = useState("");
+  const [addingMode, setAddingMode] = useState<"none" | "note" | "category">("none");
+  const [newItemName, setNewItemName] = useState("");
+  const [addingInCategory, setAddingInCategory] = useState<string | null>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
 
   const { data: categories = [] } = trpc.notes.listCategories.useQuery({
@@ -158,6 +171,7 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
   });
 
   const createNote = trpc.notes.createNote.useMutation();
+  const createCategory = trpc.notes.createCategory.useMutation();
   const updateNote = trpc.notes.updateNote.useMutation();
   const batchUpdate = trpc.notes.batchUpdateNotes.useMutation();
   const utils = trpc.useUtils();
@@ -167,6 +181,7 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
     if (categories.length > 0) {
       setExpandedCategories((prev) => {
         const next = new Set(prev);
+        next.add("__archived__");
         for (const cat of categories) {
           next.add(cat.id);
         }
@@ -180,29 +195,29 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
     useSensor(KeyboardSensor),
   );
 
-  // Group notes by category
+  // Group notes: notes with categoryId → that category, notes without categoryId → archive
   const grouped = useMemo(() => {
     const map = new Map<string, Note[]>();
-    map.set("__uncategorized__", []);
     for (const cat of categories) {
       map.set(cat.id, []);
     }
+    map.set("__archived__", []);
     for (const note of notes) {
-      const key = note.categoryId ?? "__uncategorized__";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key)!.push(note);
+      const key = note.categoryId ?? "__archived__";
+      if (!map.has(key)) {
+        // categoryId references a deleted category, move to archive
+        map.get("__archived__")!.push(note);
+      } else {
+        map.get(key)!.push(note);
+      }
     }
     return map;
   }, [notes, categories]);
 
-  const archiveCategory = categories.find((c) => c.isArchive);
-
-  // Visible notes (all notes not in archive unless viewing archive)
-  const visibleNotes = notes;
-
+  // All visible note IDs
   const allVisibleIds = useMemo(
-    () => new Set(visibleNotes.map((n) => n.id)),
-    [visibleNotes],
+    () => new Set(notes.map((n) => n.id)),
+    [notes],
   );
 
   const allSelected =
@@ -211,7 +226,7 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
 
   const handleSelectAll = useCallback(() => {
     if (allSelected) {
-      setSelectedIds(new Set());
+      setSelectedIds(new Set<string>());
     } else {
       setSelectedIds(new Set(allVisibleIds));
     }
@@ -233,9 +248,7 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
     (note: Note) => {
       updateNote.mutate(
         { id: note.id, active: !(note.active ?? true) },
-        {
-          onSuccess: () => utils.notes.listNotes.invalidate({ notebookId }),
-        },
+        { onSuccess: () => utils.notes.listNotes.invalidate({ notebookId }) },
       );
     },
     [updateNote, utils, notebookId],
@@ -248,27 +261,15 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
     [setOpenedNoteId],
   );
 
+  // Batch archive = move to no category (which IS the archive)
   const handleBatchArchive = useCallback(() => {
     const ids = [...selectedIds];
     batchUpdate.mutate(
-      { ids, archived: true },
+      { ids, categoryId: null },
       {
         onSuccess: () => {
           utils.notes.listNotes.invalidate({ notebookId });
-          setSelectedIds(new Set());
-        },
-      },
-    );
-  }, [selectedIds, batchUpdate, utils, notebookId, setSelectedIds]);
-
-  const handleBatchUnarchive = useCallback(() => {
-    const ids = [...selectedIds];
-    batchUpdate.mutate(
-      { ids, archived: false },
-      {
-        onSuccess: () => {
-          utils.notes.listNotes.invalidate({ notebookId });
-          setSelectedIds(new Set());
+          setSelectedIds(new Set<string>());
         },
       },
     );
@@ -283,34 +284,51 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
       {
         onSuccess: () => {
           utils.notes.listNotes.invalidate({ notebookId });
-          setSelectedIds(new Set());
+          setSelectedIds(new Set<string>());
         },
       },
     );
   }, [selectedIds, notes, batchUpdate, utils, notebookId, setSelectedIds]);
 
-  const handleAddNote = useCallback(() => {
-    if (!newNoteName.trim()) {
-      setIsAdding(false);
+  // Create note (default goes to archive = null categoryId)
+  function handleSubmit() {
+    const value = addInputRef.current?.value.trim() ?? "";
+    if (!value) {
+      setAddingMode("none");
+      setNewItemName("");
       return;
     }
-    createNote.mutate(
-      { notebookId, name: newNoteName.trim(), categoryId: null },
-      {
-        onSuccess: () => {
-          utils.notes.listNotes.invalidate({ notebookId });
-          setNewNoteName("");
-          setIsAdding(false);
+    if (addingMode === "category") {
+      createCategory.mutate(
+        { notebookId, name: value },
+        {
+          onSuccess: () => {
+            utils.notes.listCategories.invalidate({ notebookId });
+            setNewItemName("");
+            setAddingMode("none");
+          },
         },
-      },
-    );
-  }, [newNoteName, createNote, notebookId, utils]);
+      );
+    } else {
+      createNote.mutate(
+        { notebookId, name: value, categoryId: addingInCategory },
+        {
+          onSuccess: () => {
+            utils.notes.listNotes.invalidate({ notebookId });
+            setNewItemName("");
+            setAddingMode("none");
+            setAddingInCategory(null);
+          },
+        },
+      );
+    }
+  }
 
   useEffect(() => {
-    if (isAdding && addInputRef.current) {
+    if (addingMode !== "none" && addInputRef.current) {
       addInputRef.current.focus();
     }
-  }, [isAdding]);
+  }, [addingMode]);
 
   const toggleCategory = (catId: string) => {
     setExpandedCategories((prev) => {
@@ -322,85 +340,90 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
   };
 
   const handleDragEnd = (_event: DragEndEvent) => {
-    // Drop handling implemented separately
+    // Drop handling done by parent DndContext
   };
 
-  // Determine if selected notes are all in archive category
+  // Check if selected notes are all in archive (categoryId === null)
   const selectedInArchive = useMemo(() => {
-    if (!archiveCategory) return false;
     const selectedNotes = notes.filter((n) => selectedIds.has(n.id));
     return (
       selectedNotes.length > 0 &&
-      selectedNotes.every((n) => n.categoryId === archiveCategory.id)
+      selectedNotes.every((n) => n.categoryId === null)
     );
-  }, [selectedIds, notes, archiveCategory]);
+  }, [selectedIds, notes]);
 
   const selectedAllActive = useMemo(() => {
     const selectedNotes = notes.filter((n) => selectedIds.has(n.id));
     return selectedNotes.length > 0 && selectedNotes.every((n) => n.active ?? true);
   }, [selectedIds, notes]);
 
-  // Build ordered category list: uncategorized first, archive last, rest in position order
+  // Build ordered sections: real categories first (by position), then archive at bottom
   const orderedSections = useMemo(() => {
     const sections: { id: string; name: string; isArchive: boolean }[] = [];
-    const uncatNotes = grouped.get("__uncategorized__") ?? [];
-    if (uncatNotes.length > 0) {
-      sections.push({
-        id: "__uncategorized__",
-        name: "Uncategorized",
-        isArchive: false,
-      });
-    }
-    const nonArchive = categories
-      .filter((c) => !c.isArchive)
-      .sort((a, b) => a.position - b.position);
-    for (const cat of nonArchive) {
+    const sorted = [...categories].sort((a, b) => a.position - b.position);
+    for (const cat of sorted) {
       sections.push({ id: cat.id, name: cat.name, isArchive: false });
     }
-    if (archiveCategory) {
-      sections.push({
-        id: archiveCategory.id,
-        name: archiveCategory.name,
-        isArchive: true,
-      });
-    }
+    // Archive is always last — notes with no categoryId
+    sections.push({ id: "__archived__", name: "已归档", isArchive: true });
     return sections;
-  }, [categories, grouped, archiveCategory]);
+  }, [categories]);
 
   return (
-    <div className="flex flex-col h-full border-r border-base-300 bg-base-100">
+    <div className="flex flex-col h-full bg-base-100">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 p-2 border-b border-base-300">
-        <button
-          className="btn btn-ghost btn-xs"
-          onClick={() => setIsAdding(true)}
-          title="Add note"
-        >
-          <Plus size={14} />
-        </button>
+      <div className="flex items-center gap-1 p-2 border-b border-base-300">
+        {/* Add dropdown */}
+        <div className="dropdown">
+          <label tabIndex={0} className="btn btn-ghost btn-xs" title="创建">
+            <Plus size={14} />
+          </label>
+          <ul
+            tabIndex={0}
+            className="dropdown-content menu menu-xs bg-base-200 rounded-box shadow-lg z-10 w-28"
+          >
+            <li>
+              <button
+                onClick={() => {
+                  setAddingMode("category");
+                  setAddingInCategory(null);
+                }}
+              >
+                <FolderPlus size={14} />
+                创建分类
+              </button>
+            </li>
+            <li>
+              <button
+                onClick={() => {
+                  setAddingMode("note");
+                  setAddingInCategory(null);
+                }}
+              >
+                <NotePencil size={14} />
+                创建笔记
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        {/* Select all */}
         <button
           className="btn btn-ghost btn-xs"
           onClick={handleSelectAll}
-          title={allSelected ? "Deselect all" : "Select all"}
+          title={allSelected ? "全反选" : "全选"}
         >
           {allSelected ? <CheckSquare size={14} /> : <Square size={14} />}
         </button>
 
+        {/* Batch actions when selected */}
         {selectedIds.size > 0 && (
           <>
-            {selectedInArchive ? (
-              <button
-                className="btn btn-ghost btn-xs"
-                onClick={handleBatchUnarchive}
-                title="Unarchive"
-              >
-                <Tray size={14} />
-              </button>
-            ) : (
+            {!selectedInArchive && (
               <button
                 className="btn btn-ghost btn-xs"
                 onClick={handleBatchArchive}
-                title="Archive"
+                title="批量归档"
               >
                 <Archive size={14} />
               </button>
@@ -408,13 +431,14 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
             <button
               className="btn btn-ghost btn-xs"
               onClick={handleBatchActiveToggle}
-              title={selectedAllActive ? "Set Inactive" : "Set Active"}
+              title={selectedAllActive ? "批量停用" : "批量启用"}
             >
               <ToggleRight size={14} />
             </button>
           </>
         )}
 
+        {/* Sort */}
         <div className="ml-auto">
           <div className="dropdown dropdown-end">
             <label tabIndex={0} className="btn btn-ghost btn-xs">
@@ -422,14 +446,14 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
             </label>
             <ul
               tabIndex={0}
-              className="dropdown-content menu menu-xs bg-base-200 rounded-box shadow-lg z-10 w-28"
+              className="dropdown-content menu menu-xs bg-base-200 rounded-box shadow-lg z-10 w-24"
             >
               <li>
                 <button
                   className={sortMode === "latest" ? "active" : ""}
                   onClick={() => setSortMode("latest")}
                 >
-                  Latest
+                  最新
                 </button>
               </li>
               <li>
@@ -437,7 +461,7 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
                   className={sortMode === "name" ? "active" : ""}
                   onClick={() => setSortMode("name")}
                 >
-                  Name
+                  名称
                 </button>
               </li>
             </ul>
@@ -446,25 +470,34 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
       </div>
 
       {/* Inline add input */}
-      {isAdding && (
-        <div className="px-2 py-1 border-b border-base-300">
+      {addingMode !== "none" && (
+        <form
+          className="px-2 py-1.5 border-b border-base-300"
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSubmit();
+          }}
+        >
+          <div className="text-xs text-base-content/50 mb-1">
+            {addingMode === "category" ? "新建分类" : "新建笔记"}
+          </div>
           <input
             ref={addInputRef}
             type="text"
             className="input input-xs input-bordered w-full"
-            placeholder="Note name..."
-            value={newNoteName}
-            onChange={(e) => setNewNoteName(e.target.value)}
+            placeholder={addingMode === "category" ? "分类名称..." : "笔记名称..."}
+            value={newItemName}
+            onChange={(e) => setNewItemName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") handleAddNote();
               if (e.key === "Escape") {
-                setIsAdding(false);
-                setNewNoteName("");
+                e.preventDefault();
+                setAddingMode("none");
+                setNewItemName("");
               }
             }}
-            onBlur={handleAddNote}
+            onBlur={() => handleSubmit()}
           />
-        </div>
+        </form>
       )}
 
       {/* Tree List */}

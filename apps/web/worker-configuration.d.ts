@@ -7,6 +7,7 @@ interface CloudflareBindings {
   R2: R2Bucket;
   AI: Ai;
   AI_SEARCH: AiSearchNamespace;
+  CHAT_DO: DurableObjectNamespace<import("./src/server/chat/ChatSessionDO").ChatSessionDO>;
   BIGBIGDOG_AI_KEY: string;
   DEEPSEEK_AI_KEY: string;
   CF_AI_GATEWAY_ID: string;

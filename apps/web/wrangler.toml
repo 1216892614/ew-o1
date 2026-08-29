@@ -44,3 +44,11 @@ CF_AI_GATEWAY_ID = "ew-ai-gateway"
 # Secrets (set via `wrangler secret put`):
 # BIGBIGDOG_AI_KEY, DEEPSEEK_AI_KEY
 
+[durable_objects]
+bindings = [
+  { name = "CHAT_DO", class_name = "ChatSessionDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatSessionDO"]

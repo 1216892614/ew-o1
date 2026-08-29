@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";
 import { Provider as JotaiProvider } from "jotai";
@@ -8,14 +8,20 @@ import { trpc } from "@/client/lib/trpc";
 import { NotesSidebar } from "@/client/components/notebook/NotesSidebar";
 import { AgentChat } from "@/client/components/notebook/AgentChat";
 import { EditorPanel } from "@/client/components/notebook/EditorPanel";
-import { ModelSelector, type ModelInfo, MODELS } from "@/client/components/notebook/ModelSelector";
+import { ModelSelector, type ModelConfig, getDefaultModelConfig } from "@/client/components/notebook/ModelSelector";
 import { SessionSelector } from "@/client/components/notebook/SessionSelector";
 import { NotebookMetaModal } from "@/client/components/notebook/NotebookMetaModal";
 import { useAtom, useSetAtom } from "jotai";
 import { openedNoteIdAtom, selectedNoteIdsAtom } from "@/client/components/notebook/state";
+import { z } from "zod";
+
+const notebookSearchSchema = z.object({
+  leaf: z.string().optional(),
+});
 
 export const Route = createFileRoute("/notebook/$id")({
   component: NotebookPage,
+  validateSearch: notebookSearchSchema,
 });
 
 function NotebookPage() {
@@ -33,16 +39,31 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
   const { data: notesList } = trpc.notes.listNotes.useQuery({ notebookId });
   const batchUpdate = trpc.notes.batchUpdateNotes.useMutation();
   const utils = trpc.useUtils();
+  const navigate = Route.useNavigate();
+
+  const { leaf: leafFromUrl } = Route.useSearch();
 
   const [showMetaModal, setShowMetaModal] = useState(false);
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [showSessionSelector, setShowSessionSelector] = useState(false);
-  const [currentModel, setCurrentModel] = useState<ModelInfo>(MODELS[0]);
+  const [modelConfig, setModelConfig] = useState<ModelConfig>(getDefaultModelConfig());
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [draggedNoteIds, setDraggedNoteIds] = useState<string[]>([]);
+  const [leafId, setLeafIdState] = useState<string | null>(leafFromUrl ?? null);
 
   const [selectedNoteIds, setSelectedNoteIds] = useAtom(selectedNoteIdsAtom);
   const setOpenedNoteId = useSetAtom(openedNoteIdAtom);
+
+  const setLeafId = useCallback(
+    (id: string | null) => {
+      setLeafIdState(id);
+      navigate({
+        search: { leaf: id ?? undefined },
+        replace: true,
+      });
+    },
+    [navigate],
+  );
 
   function handleDragStart(event: DragStartEvent) {
     const noteId = event.active.id as string;
@@ -63,14 +84,12 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
     const dropId = over.id as string;
 
     if (dropId === "editor-drop-zone") {
-      // Open first dragged note in editor
       if (draggedNoteIds.length > 0) {
         setOpenedNoteId(draggedNoteIds[0]);
       }
     } else if (dropId === "chat-drop-zone") {
       // Handled by AgentChat's onDrop
     } else if (dropId.startsWith("category-")) {
-      // Move notes to category
       const categoryId = dropId.replace("category-", "");
       batchUpdate.mutate(
         { ids: draggedNoteIds, categoryId: categoryId === "uncategorized" ? null : categoryId },
@@ -122,8 +141,11 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
           <div className="flex-1 flex flex-col overflow-hidden border-r border-base-300">
             <AgentChat
               notebookId={notebookId}
-              currentModel={currentModel}
+              modelConfig={modelConfig}
               currentSessionId={currentSessionId}
+              setCurrentSessionId={setCurrentSessionId}
+              leafId={leafId}
+              setLeafId={setLeafId}
               onOpenModelSelector={() => setShowModelSelector(true)}
               onOpenSessionSelector={() => setShowSessionSelector(true)}
               draggedNoteIds={draggedNoteIds}
@@ -156,9 +178,9 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
       )}
       {showModelSelector && (
         <ModelSelector
-          currentModelId={currentModel.id}
-          onSelect={(m) => {
-            setCurrentModel(m);
+          currentConfig={modelConfig}
+          onConfirm={(config) => {
+            setModelConfig(config);
             setShowModelSelector(false);
           }}
           onClose={() => setShowModelSelector(false)}

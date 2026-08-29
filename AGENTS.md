@@ -90,15 +90,53 @@ tag = "笔记"
 ```
 客户端                              服务端
 ─────────────────────              ──────────────────────
-React + jotai 状态                  @tanstack/ai
-  TanStack Virtual (消息列表)         generate()
-  Streamdown (流式 md 渲染)           tools + maxIterations
-              ←─── SSE ───→          adapter (openai/anthropic/...)
+React + fetch SSE                   Hono /api/chat
+  Streamdown (流式 md 渲染)            ↓
+  tree path 解析 + leaf 导航        ChatSessionDO (Durable Object)
+              ←─── SSE ───→          @tanstack/ai chat()
+                                     tools + maxIterations(5)
+                                     openai adapter → dogapi.cc/deepseek
+                                     SQLite 树形节点存储 (热缓存)
+                                     → R2 JSONL 持久化 (冷存储)
 ```
 
-- **服务端**: `@tanstack/ai` 的 `generate()` + `tools` + `maxIterations` 实现 agent loop，通过 SSE 流式返回
-- **客户端**: 自定义 SSE 消费 → jotai atoms 管理消息状态 → TanStack Virtual 虚拟滚动 → Streamdown 渲染 markdown
-- **API Gateway**: TanStack AI adapters 统一多模型接入 (`@tanstack/ai-openai`, `@tanstack/ai-anthropic` 等)
+- **Durable Object**: `ChatSessionDO` — 每个 session 一个实例，SQLite `nodes` 表存储树形消息，`chat()` 生成流式回复，完成后 flush 到 R2
+- **服务端**: `@tanstack/ai` 的 `chat()` + `toolDefinition()` + `maxIterations(5)` 实现 agent loop，`toServerSentEventsResponse()` 转 SSE
+- **客户端**: fetch SSE → 解析 `TEXT_MESSAGE_CONTENT` delta → React state → Streamdown 渲染 markdown
+- **模型路由**: DeepSeek 模型 → AI Gateway → DeepSeek API; 其他 → dogapi.cc (OpenAI 兼容)
+
+### 对话树结构
+
+消息以树形结构存储，每个节点有 `parentId` 指向父节点：
+
+```
+null
+ └─ UserNode (id=u1, parentId=null)  "你好"
+     ├─ AssistantNode (id=a1, parentId=u1)  "你好！"
+     │   └─ UserNode (id=u2, parentId=a1)  "继续"
+     │       └─ AssistantNode (id=a2, parentId=u2)  "好的..."
+     └─ AssistantNode (id=a3, parentId=u1)  "嗨！" (retry 版本)
+```
+
+- **UserNode**: 记录用户输入 + 使用的模型/参数快照
+- **AssistantNode**: 记录完整 agent loop timeline (thinking, tool_call, text)
+- **版本切换**: 同一 parentId 下的同 role 兄弟节点 = 版本 (编辑/重试)
+- **路径解析**: 从 leaf 节点向上回溯到 root 得到一条对话路径
+- **默认分支**: 无 leaf 指定时取最新分支 (每层最右子节点)
+
+共享类型定义: `apps/web/src/shared/chat-types.ts`
+
+路由: `/notebook/$id?leaf=<nanoid>` — leaf 参数定位对话分支
+
+### 持久化模型
+
+| 层 | 存储 | 角色 |
+|---|---|---|
+| DO SQLite `nodes` 表 | Durable Object | 热缓存，实时读写 |
+| R2 `.chat/{sessionId}.jsonl` | R2 Bucket | 冷存储，agent loop 完成后整体写入 |
+| D1 `sessions` 表 | D1 Database | session 元信息 (name, model, lastMessageAt) |
+
+D1 不存消息体。DO SQLite 自动从旧 `messages` 表迁移到 `nodes` 表。
 
 ### 已安装 Skills
 
@@ -210,9 +248,9 @@ R2 路径结构见「核心概念」章节。D1 作为热缓存层：
 |---|---|
 | `notebooks` | notebook 元信息镜像 (name, color, icon, description, archived, updated_at) |
 | `files` | 文件索引 + 按需缓存的 content，含 dirty 标记 |
-| `chat_sessions` | 对话 session 元信息 (title, model, created_at, updated_at) |
+| `sessions` | 对话 session 元信息 (name, model_id, model_name, last_message_at) |
 
-对话消息体不存 D1 — 完整记录在 R2 的 `.chat/{session_id}.jsonl`，按需流式读取。
+对话消息存储在 DO SQLite (热缓存) + R2 `.chat/{session_id}.jsonl` (冷存储)，不存 D1。
 
 ### 同步模型
 
@@ -222,7 +260,7 @@ R2 路径结构见「核心概念」章节。D1 作为热缓存层：
 | 修改元信息 | D1 → R2 | 写回 `ew-o1.toml` |
 | 打开文件 | R2 → D1 | 缓存到 `files.content` |
 | 修改文件 | D1 → R2 | 即刻同步 |
-| 对话消息追加 | → R2 | append 到 `.jsonl` |
+| agent loop 完成 | DO SQLite → R2 | 整体 flush 到 `.chat/{session_id}.jsonl` |
 
 ### 关键约束
 
@@ -233,16 +271,21 @@ R2 路径结构见「核心概念」章节。D1 作为热缓存层：
 
 ## Cloudflare 资源
 
-| 资源类型 | 命名 | 说明 |
-|----------|------|------|
-| D1 Database | `ew-d1` | 主数据库 (id: `e37fe27b-761b-4b79-b1bd-b46e5ebd0323`) |
-| R2 Bucket | `ew-r2` | 对象存储 |
-| AI Gateway | `ew-ai-gateway` | AI 请求网关 |
-| AI Search | `ew-ai-search` | 语义搜索 |
-| Worker | `ew-o1` | 主 Worker |
-| Browser | binding `BROWSER` | 网页渲染 |
+| 资源类型 | 命名 | Binding | 说明 |
+|----------|------|---------|------|
+| D1 Database | `ew-d1` | `DB` | 主数据库 (id: `e37fe27b-761b-4b79-b1bd-b46e5ebd0323`) |
+| R2 Bucket | `ew-r2` | `R2` | 对象存储 |
+| AI Gateway | `ew-ai-gateway` | `CF_AI_GATEWAY_ID` | AI 请求网关 |
+| AI Search | `ew-ai-search` | `AI_SEARCH` | 语义搜索 |
+| Durable Object | `ChatSessionDO` | `CHAT_DO` | 聊天会话状态持久化 |
+| Worker | `ew-o1` | — | 主 Worker |
+| Browser | — | `BROWSER` | 网页渲染 |
+| Workers AI | — | `AI` | 嵌入/生成 |
 
-命名模板: `ew-{资源类型简称}`
+命名规范:
+- **资源名**: `ew-{资源类型简称}` (e.g. `ew-d1`, `ew-r2`)
+- **Binding 名**: 大写 SCREAMING_SNAKE (e.g. `CHAT_DO`, `AI_SEARCH`)
+- 新增资源一律以 `ew-` 前缀命名，binding 保持语义明确的大写缩写
 
 ## Secrets
 
@@ -266,7 +309,7 @@ R2 路径结构见「核心概念」章节。D1 作为热缓存层：
 - **小函数组合** — 每个函数只做一件事，通过组合构建复杂逻辑
 - **禁止 `any`** (泛型 extends 除外)
 - **禁止 `useContext`** — 全局状态用 jotai atom
-- **Icons**: `@phosphor-icons/react` — 禁止手写 svg
+- **Icons**: 仅限 `@phosphor-icons/react` — 禁止 `lucide-react` 等其他图标库，禁止手写 svg
 - **Tooltip**: `react-tooltip` (非 daisyUI)
 - **Toast**: `react-hot-toast`
 - AI 服务端: `@tanstack/ai` generate + tools（查阅 `.agents/skills/tanstack-ai/`）
