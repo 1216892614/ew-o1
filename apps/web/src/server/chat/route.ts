@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { HonoCtxEnv } from "@/shared/types";
+import type { ChatAnswerBody } from "@/shared/chat-types";
 
 const chatRoute = new Hono<HonoCtxEnv>();
 
@@ -30,6 +31,15 @@ chatRoute.get("/api/chat/messages", async (c) => {
 
   const result = await stub.getMessages();
   return c.json(result);
+});
+
+chatRoute.post("/api/chat/answer", async (c) => {
+  const body = (await c.req.json()) as ChatAnswerBody;
+  const sessionKey = `${body.notebookId}/${body.sessionId}`;
+  const stub = c.env.CHAT_DO.getByName(sessionKey);
+  stub.setSessionKey(sessionKey);
+  await stub.answer(body.answers);
+  return c.json({ success: true });
 });
 
 export { chatRoute };

@@ -26,7 +26,33 @@ export type ToolCallEntry = {
 
 export type TextEntry = { kind: "text"; content: string; streaming: boolean };
 
-export type TimelineEntry = ThinkingEntry | ToolCallEntry | TextEntry;
+export type ReplyEntry = { kind: "reply"; message: string };
+
+export type AskQuestion = {
+  id: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+  multi?: boolean;
+};
+
+export type AskEntry = {
+  kind: "ask";
+  questions: AskQuestion[];
+  answers?: Record<string, string | string[]>;
+  resolved: boolean;
+};
+
+export type FinishEntry = { kind: "finish"; message: string };
+
+export type TimelineEntry = ThinkingEntry | ToolCallEntry | TextEntry | ReplyEntry | AskEntry | FinishEntry;
+
+/* ── Injected context (notes fed to AI as system prompt) ── */
+
+export interface InjectedContextItem {
+  name: string;
+  snippet: string;
+  relevance?: number;
+}
 
 /* ── Node types ─────────────────────────────────────────── */
 
@@ -48,10 +74,11 @@ export interface AssistantNode {
   parentId: string;
   content: string;
   timeline: TimelineEntry[];
+  injectedContext?: InjectedContextItem[];
   model: string;
   modelName: string;
   modelProvider: string;
-  status: "done" | "error" | "streaming";
+  status: "done" | "error" | "streaming" | "waiting";
   createdAt: number;
 }
 
@@ -86,6 +113,13 @@ export interface ChatRequestBody {
 export interface ChatMessagesResponse {
   nodes: ChatNode[];
   leafId: string | null;
+}
+
+/** POST /api/chat/answer body — user answers an ask() tool call */
+export interface ChatAnswerBody {
+  sessionId: string;
+  notebookId: string;
+  answers: Record<string, string | string[]>;
 }
 
 /* ── Tree utilities (shared between server and client) ──── */

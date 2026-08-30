@@ -13,21 +13,7 @@ import {
   FolderPlus,
   NotePencil,
 } from "@phosphor-icons/react";
-import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { trpc } from "@/client/lib/trpc";
 import { selectedNoteIdsAtom, sortModeAtom, openedNoteIdAtom } from "./state";
 
@@ -56,6 +42,7 @@ interface Category {
 
 interface NotesSidebarProps {
   notebookId: string;
+  draggedNoteIds: string[];
 }
 
 function relativeTime(date: Date): string {
@@ -73,10 +60,11 @@ function relativeTime(date: Date): string {
   return `${Math.floor(diffMonths / 12)}年前`;
 }
 
-function SortableNoteItem({
+function DraggableNoteItem({
   note,
   isSelected,
   isOpened,
+  isBeingDragged,
   onToggleSelect,
   onToggleActive,
   onOpen,
@@ -85,26 +73,23 @@ function SortableNoteItem({
   note: Note;
   isSelected: boolean;
   isOpened: boolean;
+  isBeingDragged: boolean;
   onToggleSelect: (id: string) => void;
   onToggleActive: (note: Note) => void;
   onOpen: (id: string) => void;
   inArchiveCategory: boolean;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: note.id });
+  const { attributes, listeners, setNodeRef, isDragging } =
+    useDraggable({ id: note.id });
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  };
+  const dimmed = isDragging || isBeingDragged;
 
   return (
     <div
       ref={setNodeRef}
-      style={style}
       {...attributes}
       {...listeners}
+      style={{ opacity: dimmed ? 0.3 : 1 }}
       className={`flex items-center gap-2 px-3 py-2 hover:bg-base-200 rounded cursor-pointer mx-1 ${
         isOpened ? "bg-base-200" : ""
       }`}
@@ -148,8 +133,53 @@ function SortableNoteItem({
     </div>
   );
 }
+function DroppableCategorySection({
+  sectionId,
+  sectionName,
+  isArchive,
+  isExpanded,
+  noteCount,
+  onToggle,
+  children,
+}: {
+  sectionId: string;
+  sectionName: string;
+  isArchive: boolean;
+  isExpanded: boolean;
+  noteCount: number;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  const droppableId = isArchive ? "category-uncategorized" : `category-${sectionId}`;
+  const { setNodeRef, isOver } = useDroppable({ id: droppableId });
 
-export function NotesSidebar({ notebookId }: NotesSidebarProps) {
+  return (
+    <div ref={setNodeRef}>
+      <button
+        className={`flex items-center gap-1 px-3 py-1.5 w-full text-left hover:bg-base-200 transition-colors ${
+          isOver ? "bg-primary/10 ring-1 ring-primary/30" : ""
+        }`}
+        onClick={onToggle}
+      >
+        {isExpanded ? (
+          <CaretDown size={12} className="text-base-content/70" />
+        ) : (
+          <CaretRight size={12} className="text-base-content/70" />
+        )}
+        <span className="font-medium text-sm text-base-content/70">
+          {sectionName}
+        </span>
+        <span className="text-xs text-base-content/40 ml-1">
+          ({noteCount})
+        </span>
+      </button>
+      {children}
+    </div>
+  );
+}
+
+
+export function NotesSidebar({ notebookId, draggedNoteIds }: NotesSidebarProps) {
   const [selectedIds, setSelectedIds] = useAtom(selectedNoteIdsAtom);
   const [sortMode, setSortMode] = useAtom(sortModeAtom);
   const setOpenedNoteId = useSetAtom(openedNoteIdAtom);
@@ -190,10 +220,6 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
     }
   }, [categories]);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor),
-  );
 
   // Group notes: notes with categoryId → that category, notes without categoryId → archive
   const grouped = useMemo(() => {
@@ -339,9 +365,6 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
     });
   };
 
-  const handleDragEnd = (_event: DragEndEvent) => {
-    // Drop handling done by parent DndContext
-  };
 
   // Check if selected notes are all in archive (categoryId === null)
   const selectedInArchive = useMemo(() => {
@@ -356,6 +379,8 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
     const selectedNotes = notes.filter((n) => selectedIds.has(n.id));
     return selectedNotes.length > 0 && selectedNotes.every((n) => n.active ?? true);
   }, [selectedIds, notes]);
+
+  const draggedSet = useMemo(() => new Set(draggedNoteIds), [draggedNoteIds]);
 
   // Build ordered sections: real categories first (by position), then archive at bottom
   const orderedSections = useMemo(() => {
@@ -501,58 +526,39 @@ export function NotesSidebar({ notebookId }: NotesSidebarProps) {
       )}
 
       {/* Tree List */}
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={handleDragEnd}
-      >
         <div className="flex-1 overflow-y-auto">
           {orderedSections.map((section) => {
             const sectionNotes = grouped.get(section.id) ?? [];
             const isExpanded = expandedCategories.has(section.id);
 
             return (
-              <div key={section.id}>
-                <button
-                  className="flex items-center gap-1 px-3 py-1.5 w-full text-left hover:bg-base-200"
-                  onClick={() => toggleCategory(section.id)}
-                >
-                  {isExpanded ? (
-                    <CaretDown size={12} className="text-base-content/70" />
-                  ) : (
-                    <CaretRight size={12} className="text-base-content/70" />
-                  )}
-                  <span className="font-medium text-sm text-base-content/70">
-                    {section.name}
-                  </span>
-                  <span className="text-xs text-base-content/40 ml-1">
-                    ({sectionNotes.length})
-                  </span>
-                </button>
-                {isExpanded && (
-                  <SortableContext
-                    items={sectionNotes.map((n) => n.id)}
-                    strategy={verticalListSortingStrategy}
-                  >
-                    {sectionNotes.map((note) => (
-                      <SortableNoteItem
-                        key={note.id}
-                        note={note}
-                        isSelected={selectedIds.has(note.id)}
-                        isOpened={false}
-                        onToggleSelect={handleToggleSelect}
-                        onToggleActive={handleToggleActive}
-                        onOpen={handleOpen}
-                        inArchiveCategory={section.isArchive}
-                      />
-                    ))}
-                  </SortableContext>
-                )}
-              </div>
+              <DroppableCategorySection
+                key={section.id}
+                sectionId={section.id}
+                sectionName={section.name}
+                isArchive={section.isArchive}
+                isExpanded={isExpanded}
+                noteCount={sectionNotes.length}
+                onToggle={() => toggleCategory(section.id)}
+              >
+                {isExpanded &&
+                  sectionNotes.map((note) => (
+                    <DraggableNoteItem
+                      key={note.id}
+                      note={note}
+                      isSelected={selectedIds.has(note.id)}
+                      isOpened={false}
+                      isBeingDragged={draggedSet.has(note.id)}
+                      onToggleSelect={handleToggleSelect}
+                      onToggleActive={handleToggleActive}
+                      onOpen={handleOpen}
+                      inArchiveCategory={section.isArchive}
+                    />
+                  ))}
+              </DroppableCategorySection>
             );
           })}
         </div>
-      </DndContext>
     </div>
   );
 }

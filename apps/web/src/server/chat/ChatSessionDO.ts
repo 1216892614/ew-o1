@@ -1,7 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { chat, maxIterations, toServerSentEventsResponse, toolDefinition, type StreamChunk } from "@tanstack/ai";
+import { chat, toServerSentEventsResponse, type StreamChunk } from "@tanstack/ai";
 import { OpenAIChatCompletionsTextAdapter } from "@tanstack/ai-openai";
-import { z } from "zod";
 import type {
   ChatNode,
   UserNode,
@@ -9,10 +8,15 @@ import type {
   TimelineEntry,
   ThinkingEntry,
   ToolCallEntry,
+  ReplyEntry,
+  AskEntry,
+  FinishEntry,
   ChatRequestBody,
   ChatMessagesResponse,
+  InjectedContextItem,
 } from "@/shared/chat-types";
 import { resolvePathToLeaf, findLatestLeaf } from "@/shared/chat-types";
+import { createAgentTools } from "./tools";
 
 /* ── Persisted row shape in DO SQLite ──────────────────── */
 
@@ -22,12 +26,14 @@ interface NodeRow {
   parentId: string | null;
   content: string;
   timeline: string | null;
+  injected_context: string | null;
   model: string | null;
   modelName: string | null;
   modelProvider: string | null;
   modelParams: string | null;
   status: string | null;
   createdAt: number;
+  [key: string]: string | number | null;
 }
 
 /* ── Durable Object ────────────────────────────────────── */
@@ -35,6 +41,9 @@ interface NodeRow {
 export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
   private notebookId = "";
   private sessionId = "";
+  private contentHashMap = new Map<string, string>();
+  private askResolver: { resolve: (v: unknown) => void } | null = null;
+  private finishCalled = false;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -54,6 +63,14 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
           created_at INTEGER NOT NULL
         )
       `);
+
+      const hasContextCol = this.ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(nodes)")
+        .toArray()
+        .some((c) => c.name === "injected_context");
+      if (!hasContextCol) {
+        this.ctx.storage.sql.exec("ALTER TABLE nodes ADD COLUMN injected_context TEXT");
+      }
 
       /* ── Migration: old flat "messages" table → tree "nodes" ── */
       const hasOldTable =
@@ -134,6 +151,8 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
 
     this.notebookId = body.notebookId;
     this.sessionId = body.sessionId;
+    this.contentHashMap.clear();
+    this.finishCalled = false;
 
     const userNodeId = nanoid();
     const now = Date.now();
@@ -186,7 +205,14 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     if (body.systemPrompt) {
       systemPrompts.push(body.systemPrompt);
     }
+    const injectedContext: InjectedContextItem[] = [];
     if (body.activeNotes && body.activeNotes.length > 0) {
+      for (const note of body.activeNotes) {
+        injectedContext.push({
+          name: note.name,
+          snippet: (note.content ?? "").slice(0, 120),
+        });
+      }
       const notesContext = body.activeNotes.map((n) => `## ${n.name}\n${n.content}`).join("\n\n---\n\n");
       systemPrompts.push(
         `You have access to the following notes from the user's notebook. Reference them when relevant:\n\n${notesContext}`,
@@ -195,42 +221,20 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
 
     const adapter = this.createAdapter(body.model);
 
-    const tools = [
-      toolDefinition({
-        name: "search_notes",
-        description: "Search through the user's active notes by keyword",
-        input: z.object({
-          query: z.string().describe("Search query"),
-        }),
-        output: z.object({
-          results: z.array(
-            z.object({
-              name: z.string(),
-              snippet: z.string(),
-            }),
-          ),
-        }),
-        execute: async ({ input }) => {
-          const notes = body.activeNotes ?? [];
-          const queryLower = input.query.toLowerCase();
-          const results = notes
-            .filter(
-              (n) =>
-                n.name.toLowerCase().includes(queryLower) || n.content.toLowerCase().includes(queryLower),
-            )
-            .map((n) => {
-              const idx = n.content.toLowerCase().indexOf(queryLower);
-              const start = Math.max(0, idx - 50);
-              const end = Math.min(n.content.length, idx + input.query.length + 50);
-              return {
-                name: n.name,
-                snippet: idx >= 0 ? n.content.slice(start, end) : n.content.slice(0, 100),
-              };
-            });
-          return { results };
-        },
-      }),
-    ];
+    const self = this;
+    const tools = createAgentTools({
+      env: this.env,
+      notebookId: this.notebookId,
+      contentHashMap: this.contentHashMap,
+      askResolverRef: {
+        get current() { return self.askResolver; },
+        set current(v) { self.askResolver = v; },
+      },
+      finishFlagRef: {
+        get current() { return self.finishCalled; },
+        set current(v) { self.finishCalled = v; },
+      },
+    });
 
     const modelOptions: Record<string, unknown> = {};
     if (body.modelParams?.temperature !== undefined) {
@@ -251,7 +255,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       messages: llmMessages,
       systemPrompts: systemPrompts.length > 0 ? systemPrompts : undefined,
       tools,
-      agentLoopStrategy: maxIterations(5),
+      agentLoopStrategy: ({ iterationCount }) => iterationCount < 5 && !this.finishCalled,
       modelOptions: modelOptions as never,
     });
 
@@ -263,6 +267,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       body.modelName ?? body.model,
       body.modelProvider ?? "",
       body.model,
+      injectedContext,
     );
 
     return toServerSentEventsResponse(teedStream, {
@@ -276,6 +281,13 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     });
   }
 
+  async answer(answers: Record<string, string | string[]>) {
+    if (this.askResolver) {
+      this.askResolver.resolve({ answers });
+      this.askResolver = null;
+    }
+  }
+
   private createAdapter(model: string) {
     const isDeepseek = model.startsWith("deepseek");
     const apiKey = isDeepseek ? this.env.DEEPSEEK_AI_KEY : this.env.BIGBIGDOG_AI_KEY;
@@ -283,7 +295,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       ? `https://gateway.ai.cloudflare.com/v1/3244c8f91cd34317ce18652158e5853a/${this.env.CF_AI_GATEWAY_ID}/deepseek`
       : "https://www.dogapi.cc/v1";
 
-    return new ReasoningChatCompletionsAdapter({ apiKey, baseURL }, model as never);
+    return new ReasoningChatCompletionsAdapter({ apiKey, baseURL }, model as any);
   }
 
   /**
@@ -298,7 +310,13 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     modelName: string,
     modelProvider: string,
     model: string,
+    injectedContext: InjectedContextItem[],
   ): AsyncIterable<StreamChunk> {
+    /* Emit injected context as first event so client can display it */
+    if (injectedContext.length > 0) {
+      yield { type: "CUSTOM", data: { type: "injected_context", items: injectedContext } } as unknown as StreamChunk;
+    }
+
     const timeline: TimelineEntry[] = [];
     const contentParts: string[] = [];
 
@@ -367,6 +385,24 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
           if (entry) {
             entry.done = true;
             entry.result = ((c.content ?? c.result ?? "") as string);
+
+            const toolName = entry.name;
+            if (toolName === "reply") {
+              try {
+                const args = JSON.parse(entry.args);
+                timeline.push({ kind: "reply", message: args.message ?? "" } satisfies ReplyEntry);
+              } catch {}
+            } else if (toolName === "ask") {
+              try {
+                const args = JSON.parse(entry.args);
+                timeline.push({ kind: "ask", questions: args.questions ?? [], resolved: false } satisfies AskEntry);
+              } catch {}
+            } else if (toolName === "finish") {
+              try {
+                const args = JSON.parse(entry.args);
+                timeline.push({ kind: "finish", message: args.message ?? "" } satisfies FinishEntry);
+              } catch {}
+            }
           }
           break;
         }
@@ -397,19 +433,22 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
 
     /* Persist assistant node to DO SQLite */
     const fullContent = contentParts.join("");
+    const hasUnresolvedAsk = timeline.some((e) => e.kind === "ask" && !e.resolved);
+    const nodeStatus = hasUnresolvedAsk ? "waiting" : "done";
     this.ctx.storage.sql.exec(
-      `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO nodes (id, role, parent_id, content, timeline, injected_context, model, model_name, model_provider, model_params, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       assistantNodeId,
       "assistant",
       userNodeId,
       fullContent,
       JSON.stringify(timeline),
+      injectedContext.length > 0 ? JSON.stringify(injectedContext) : null,
       model,
       modelName,
       modelProvider,
       null,
-      "done",
+      nodeStatus,
       Date.now(),
     );
 
@@ -423,8 +462,9 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
 
     const rows = this.ctx.storage.sql
       .exec<NodeRow>(
-        `SELECT id, role, parent_id as parentId, content, timeline, model, model_name as modelName,
-                model_provider as modelProvider, model_params as modelParams, status, created_at as createdAt
+        `SELECT id, role, parent_id as parentId, content, timeline, injected_context,
+                model, model_name as modelName, model_provider as modelProvider,
+                model_params as modelParams, status, created_at as createdAt
          FROM nodes ORDER BY created_at ASC`,
       )
       .toArray();
@@ -451,12 +491,17 @@ function rowToNode(row: NodeRow): ChatNode {
           : [];
       }
     }
+    let injectedContext: InjectedContextItem[] | undefined;
+    if (row.injected_context) {
+      try { injectedContext = JSON.parse(row.injected_context); } catch {}
+    }
     return {
       id: row.id,
       role: "assistant",
       parentId: row.parentId ?? "",
       content: row.content,
       timeline,
+      injectedContext,
       model: row.model ?? "",
       modelName: row.modelName ?? "",
       modelProvider: row.modelProvider ?? "",
@@ -502,7 +547,8 @@ function nanoid(size = 21): string {
  * The base adapter has full REASONING event plumbing but its
  * `extractReasoning` is a no-op — we override it to activate.
  */
-class ReasoningChatCompletionsAdapter extends OpenAIChatCompletionsTextAdapter<never> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+class ReasoningChatCompletionsAdapter extends OpenAIChatCompletionsTextAdapter<any> {
   protected extractReasoning(chunk: unknown): { text: string } | undefined {
     const c = chunk as { choices?: Array<{ delta?: { reasoning_content?: string } }> };
     const text = c?.choices?.[0]?.delta?.reasoning_content;

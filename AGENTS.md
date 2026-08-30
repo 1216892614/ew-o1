@@ -240,6 +240,49 @@ edit_file 和 edit_content 不接受显式 hash 参数。校验流程：
 
 **返回**: `{ title: string, content: string }`  (content 为 markdown)
 
+### reply
+
+回复一段话给用户，报告当前进展。用于 agent loop 过程中向用户同步状态，不中断工具循环。
+
+**参数**: `{ message: string }`
+
+**返回**: `{ success: boolean }`
+
+**语义**: 纯信息性输出，不期望用户回复。适用于长任务中的阶段性汇报（如"已读完 3 个文件，正在搜索相关段落"）。
+
+### ask
+
+询问用户一个或多个问题。每个问题应提供备选项，用户选择后 agent 继续执行。调用后 agent loop 暂停，等待用户回答。
+
+**参数**:
+```ts
+{
+  questions: Array<{
+    id: string            // 问题唯一标识
+    question: string      // 问题文本
+    options: Array<{
+      label: string       // 选项显示文本
+      description?: string // 选项说明（可选）
+    }>
+    multi?: boolean       // 是否允许多选，默认 false
+  }>
+}
+```
+
+**返回**: `{ answers: Record<string, string | string[]> }`  (key = question id, value = 选中的 label)
+
+**语义**: 阻塞式交互。agent loop 暂停直到用户提交回答。适用于需要用户决策的场景（如"要修改哪个文件？"、"使用哪种格式？"）。
+
+### finish
+
+确认任务已完成，报告最终讯息。调用后 agent loop 终止。
+
+**参数**: `{ message: string }`
+
+**返回**: `{ success: boolean }`
+
+**语义**: 终结性输出。agent 主动声明任务完成并给出总结。调用此工具后不再执行后续工具。
+
 ## 数据架构 — D1 热缓存
 
 R2 路径结构见「核心概念」章节。D1 作为热缓存层：

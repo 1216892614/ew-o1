@@ -3,7 +3,7 @@ import { useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";
 import { Provider as JotaiProvider } from "jotai";
-import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, pointerWithin } from "@dnd-kit/core";
+import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, KeyboardSensor, useSensor, useSensors, pointerWithin } from "@dnd-kit/core";
 import { trpc } from "@/client/lib/trpc";
 import { NotesSidebar } from "@/client/components/notebook/NotesSidebar";
 import { AgentChat } from "@/client/components/notebook/AgentChat";
@@ -65,6 +65,11 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
     [navigate],
   );
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor),
+  );
+
   function handleDragStart(event: DragStartEvent) {
     const noteId = event.active.id as string;
     if (selectedNoteIds.has(noteId)) {
@@ -112,6 +117,7 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
 
   return (
     <DndContext
+      sensors={sensors}
       collisionDetection={pointerWithin}
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
@@ -134,7 +140,7 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
       <div className="flex flex-1 overflow-hidden">
           {/* Left: Notes Sidebar */}
           <div className="w-80 border-r border-base-300 flex flex-col overflow-hidden">
-            <NotesSidebar notebookId={notebookId} />
+            <NotesSidebar notebookId={notebookId} draggedNoteIds={draggedNoteIds} />
           </div>
 
           {/* Center: Agent Chat */}
@@ -142,6 +148,7 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
             <AgentChat
               notebookId={notebookId}
               modelConfig={modelConfig}
+              setModelConfig={setModelConfig}
               currentSessionId={currentSessionId}
               setCurrentSessionId={setCurrentSessionId}
               leafId={leafId}

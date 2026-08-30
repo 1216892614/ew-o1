@@ -13,10 +13,19 @@ import {
   ArrowCounterClockwise,
   Check,
   X,
+  FilePlus,
+  ChatText,
+  CheckCircle,
+  Hourglass,
+  Brain,
+  Wrench,
+  GearSix,
+  Lightning,
+  Files,
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { trpc } from "@/client/lib/trpc";
-import type { ModelConfig } from "./ModelSelector";
+import { type ModelConfig, MODELS } from "./ModelSelector";
 import type {
   ChatNode,
   UserNode,
@@ -27,6 +36,12 @@ import type {
   TextEntry,
   ChatRequestBody,
   ChatMessagesResponse,
+  ChatAnswerBody,
+  ReplyEntry,
+  AskEntry,
+  AskQuestion,
+  FinishEntry,
+  InjectedContextItem,
 } from "@/shared/chat-types";
 import {
   resolvePathToLeaf,
@@ -34,6 +49,8 @@ import {
   buildChildrenMap,
   getSiblingInfo,
 } from "@/shared/chat-types";
+
+const FILE_MUTATING_TOOLS = new Set(["edit_file", "edit_content"]);
 
 /* ── Props ──────────────────────────────────────────────── */
 
@@ -47,6 +64,7 @@ type NoteItem = {
 interface AgentChatProps {
   notebookId: string;
   modelConfig: ModelConfig;
+  setModelConfig: (config: ModelConfig) => void;
   currentSessionId: string | null;
   setCurrentSessionId: (id: string | null) => void;
   leafId: string | null;
@@ -65,8 +83,9 @@ interface StreamingAssistant {
   modelName: string;
   modelProvider: string;
   startTime: number;
-  status: "sending" | "thinking" | "tool_call" | "replying" | "done" | "error";
+  status: "sending" | "thinking" | "tool_call" | "replying" | "waiting" | "done" | "error";
   timeline: TimelineEntry[];
+  injectedContext?: InjectedContextItem[];
 }
 
 /* ── Main component ─────────────────────────────────────── */
@@ -74,6 +93,7 @@ interface StreamingAssistant {
 export function AgentChat({
   notebookId,
   modelConfig,
+  setModelConfig,
   currentSessionId,
   setCurrentSessionId,
   leafId,
@@ -126,9 +146,16 @@ export function AgentChat({
     setLeafId(null);
     setAllNodes([]);
     setStreamingAssistant(null);
+    setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
   const { setNodeRef, isOver } = useDroppable({ id: "chat-drop-zone" });
+
+  /* Auto-select latest session on first load */
+  useEffect(() => {
+    if (currentSessionId || !sessions || sessions.length === 0) return;
+    setCurrentSessionId(sessions[0].id);
+  }, [sessions]);
 
   /* Load history */
   useEffect(() => {
@@ -140,6 +167,26 @@ export function AgentChat({
     loadHistory(notebookId, currentSessionId);
   }, [currentSessionId, notebookId]);
 
+  /** Restore ModelConfig from the last user node in loaded history */
+  function restoreModelConfig(nodes: ChatNode[]) {
+    const userNodes = nodes.filter((n): n is UserNode => n.role === "user");
+    if (userNodes.length === 0) return;
+    const last = userNodes.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
+    const found = MODELS.find((m) => m.id === last.model);
+    if (!found) return;
+    const defaultMax = found.thinking ? 16384 : 8192;
+    const defaults = found.thinking
+      ? { thinkingLevel: "medium" as const, maxPerRound: defaultMax }
+      : { temperature: 0.7, topP: 1, maxPerRound: defaultMax };
+    const saved = last.modelParams;
+    setModelConfig({
+      model: found,
+      params: saved
+        ? { ...saved, maxPerRound: saved.maxPerRound ?? defaultMax }
+        : defaults,
+    });
+  }
+
   async function loadHistory(nbId: string, sessionId: string) {
     try {
       const response = await fetch(
@@ -148,6 +195,7 @@ export function AgentChat({
       if (!response.ok) return;
       const data = (await response.json()) as ChatMessagesResponse;
       setAllNodes(data.nodes);
+      restoreModelConfig(data.nodes);
       if (!leafId || !data.nodes.find((n) => n.id === leafId)) {
         setLeafId(data.leafId);
       }
@@ -312,6 +360,46 @@ export function AgentChat({
         return null;
       };
 
+      const appendInteractiveEntry = (tl: TimelineEntry[], tc: ToolCallEntry): TimelineEntry[] => {
+        if (!["reply", "ask", "finish"].includes(tc.name)) return tl;
+        const tcIndex = tl.findIndex((e) => e.kind === "tool_call" && e.toolCallId === tc.toolCallId);
+        if (tcIndex < 0) return tl;
+        const nextEntry = tl[tcIndex + 1];
+        if (nextEntry && (nextEntry.kind === "reply" || nextEntry.kind === "ask" || nextEntry.kind === "finish")) {
+          return tl;
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(tc.args) as Record<string, unknown>;
+        } catch {
+          return tl;
+        }
+        const before = tl.slice(0, tcIndex + 1);
+        const after = tl.slice(tcIndex + 1);
+        switch (tc.name) {
+          case "reply":
+            return [...before, { kind: "reply", message: (parsed.message ?? "") as string }, ...after];
+          case "ask": {
+            updateStreaming((s) => ({ ...s, status: "waiting" }));
+            return [
+              ...before,
+              {
+                kind: "ask",
+                questions: (parsed.questions ?? []) as AskQuestion[],
+                resolved: false,
+              },
+              ...after,
+            ];
+          }
+          case "finish": {
+            updateStreaming((s) => ({ ...s, status: "done" }));
+            return [...before, { kind: "finish", message: (parsed.message ?? "") as string }, ...after];
+          }
+          default:
+            return tl;
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -384,25 +472,43 @@ export function AgentChat({
               case "TOOL_CALL_END": {
                 const tcId = evt.toolCallId as string;
                 const result = evt.result != null ? JSON.stringify(evt.result) : undefined;
-                updateTimeline((tl) =>
-                  tl.map((e) =>
+                updateTimeline((tl) => {
+                  const updated = tl.map((e) =>
                     e.kind === "tool_call" && e.toolCallId === tcId
                       ? { ...e, done: true, result: result ?? e.result }
                       : e,
-                  ),
-                );
+                  );
+                  const tc = updated.find(
+                    (e): e is ToolCallEntry => e.kind === "tool_call" && e.toolCallId === tcId,
+                  );
+                  if (!tc) return updated;
+                  return appendInteractiveEntry(updated, tc);
+                });
                 break;
               }
               case "TOOL_CALL_RESULT": {
                 const tcId = evt.toolCallId as string;
                 const content = (evt.content ?? evt.result ?? "") as string;
-                updateTimeline((tl) =>
-                  tl.map((e) =>
+                updateTimeline((tl) => {
+                  const updated = tl.map((e) =>
                     e.kind === "tool_call" && e.toolCallId === tcId
                       ? { ...e, done: true, result: content }
                       : e,
-                  ),
-                );
+                  );
+                  const tc = updated.find(
+                    (e): e is ToolCallEntry => e.kind === "tool_call" && e.toolCallId === tcId,
+                  );
+                  if (!tc) return updated;
+                  return appendInteractiveEntry(updated, tc);
+                });
+
+                const toolName = streamingAssistantRef.current?.timeline.find(
+                  (e): e is ToolCallEntry => e.kind === "tool_call" && e.toolCallId === tcId,
+                )?.name;
+                if (toolName && FILE_MUTATING_TOOLS.has(toolName)) {
+                  utils.notes.listNotes.invalidate({ notebookId });
+                  utils.notes.listCategories.invalidate({ notebookId });
+                }
                 break;
               }
 
@@ -439,6 +545,16 @@ export function AgentChat({
                 const errMsg = (evt.message ?? "Unknown error") as string;
                 updateStreaming((s) => ({ ...s, status: "error" }));
                 updateTimeline((tl) => [...tl, { kind: "text", content: `Error: ${errMsg}`, streaming: false }]);
+                break;
+              }
+              case "CUSTOM": {
+                const data = evt.data as Record<string, unknown> | undefined;
+                if (data?.type === "injected_context" && Array.isArray(data.items)) {
+                  updateStreaming((s) => ({
+                    ...s,
+                    injectedContext: data.items as InjectedContextItem[],
+                  }));
+                }
                 break;
               }
               default:
@@ -492,6 +608,7 @@ export function AgentChat({
           if (t.kind === "tool_call") return { ...t, done: true };
           return t;
         }),
+        injectedContext: prev.injectedContext,
         model: modelConfig.model.id,
         modelName: prev.modelName,
         modelProvider: prev.modelProvider,
@@ -507,6 +624,30 @@ export function AgentChat({
 
   function stopStreaming() {
     abortControllerRef.current?.abort();
+  }
+
+  async function submitAskAnswer(answers: Record<string, string | string[]>) {
+    if (!currentSessionId) return;
+    const body: ChatAnswerBody = { sessionId: currentSessionId, notebookId, answers };
+    try {
+      await fetch("/api/chat/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      return;
+    }
+    setStreamingAssistant((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        status: "thinking",
+        timeline: prev.timeline.map((e) =>
+          e.kind === "ask" && !e.resolved ? { ...e, answers, resolved: true } : e,
+        ),
+      };
+    });
   }
 
   /* ── Edit user message ────────────────────────────────── */
@@ -575,6 +716,7 @@ export function AgentChat({
                 <StreamingAssistantBlock
                   key={`streaming-${item.streaming.id}`}
                   assistant={item.streaming}
+                  onSubmitAnswer={submitAskAnswer}
                 />
               );
             }
@@ -595,12 +737,7 @@ export function AgentChat({
               <AssistantBlock
                 key={node.id}
                 node={node}
-                onRetry={() => {
-                  const userNode = allNodes.find((n) => n.id === node.parentId);
-                  if (userNode && userNode.role === "user") {
-                    sendMessage(userNode.content, userNode.parentId);
-                  }
-                }}
+                notebookId={notebookId}
               />
             );
           })
@@ -619,6 +756,7 @@ export function AgentChat({
       <div className="border-t border-base-300 p-3 shrink-0">
         <div className="relative">
           <textarea
+            autoFocus
             ref={textareaRef}
             className="textarea textarea-bordered w-full pr-12 resize-none"
             rows={1}
@@ -799,13 +937,16 @@ function UserBubble({
 
 function AssistantBlock({
   node,
-  onRetry,
+  notebookId,
 }: {
   node: AssistantNode;
-  onRetry: () => void;
+  notebookId: string;
 }) {
   const [copied, setCopied] = useState(false);
   const hasTimelineEvents = node.timeline.some((t) => t.kind === "thinking" || t.kind === "tool_call");
+  const createNoteMut = trpc.notes.createNote.useMutation();
+  const updateNoteMut = trpc.notes.updateNote.useMutation();
+  const utils = trpc.useUtils();
 
   function handleCopy() {
     navigator.clipboard.writeText(node.content);
@@ -813,19 +954,33 @@ function AssistantBlock({
     setTimeout(() => setCopied(false), 1500);
   }
 
+  async function handleAddAsFile() {
+    const name = node.content.slice(0, 40).replace(/[^a-zA-Z0-9\u4e00-\u9fff\s-]/g, "").trim() || "untitled";
+    const { id } = await createNoteMut.mutateAsync({ notebookId, categoryId: null, name });
+    await updateNoteMut.mutateAsync({ id, content: node.content });
+    await utils.notes.listNotes.invalidate({ notebookId });
+  }
+
   /* Compute elapsed from timeline */
   const elapsed = node.timeline.length > 0
     ? Math.max(1, Math.round((Date.now() - node.createdAt) / 1000))
     : 0;
 
+  const timelineSteps = node.timeline.filter((e) => e.kind !== "text");
+  const textEntries = node.timeline.filter((e): e is TextEntry => e.kind === "text");
+
   return (
     <div className="flex flex-col gap-0.5">
-      {/* Timeline */}
-      <div className="flex flex-col gap-1">
-        {node.timeline.map((entry, i) => (
-          <TimelineNode key={i} entry={entry} hasTimeline={hasTimelineEvents} />
-        ))}
-      </div>
+      {node.injectedContext && node.injectedContext.length > 0 && (
+        <ContextBanner items={node.injectedContext} />
+      )}
+      {timelineSteps.length > 0 && (
+        <TimelineTrack entries={timelineSteps} />
+      )}
+
+      {textEntries.map((entry, i) => (
+        <TextNode key={i} entry={entry} />
+      ))}
 
       {/* Bottom-left: model name, elapsed, status, actions */}
       <div className="flex items-center gap-2 text-[10px] text-base-content/30">
@@ -837,8 +992,8 @@ function AssistantBlock({
           <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={handleCopy} title="Copy">
             {copied ? <Check size={12} /> : <Copy size={12} />}
           </button>
-          <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={onRetry} title="Retry">
-            <ArrowCounterClockwise size={12} />
+          <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={handleAddAsFile} title="Add as file">
+            <FilePlus size={12} />
           </button>
         </div>
       </div>
@@ -848,19 +1003,29 @@ function AssistantBlock({
 
 /* ── Streaming assistant block ──────────────────────────── */
 
-function StreamingAssistantBlock({ assistant }: { assistant: StreamingAssistant }) {
-  const hasTimelineEvents = assistant.timeline.some((t) => t.kind === "thinking" || t.kind === "tool_call");
+function StreamingAssistantBlock({
+  assistant,
+  onSubmitAnswer,
+}: {
+  assistant: StreamingAssistant;
+  onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
+}) {
+  const timelineSteps = assistant.timeline.filter((e) => e.kind !== "text");
+  const textEntries = assistant.timeline.filter((e): e is TextEntry => e.kind === "text");
 
   return (
     <div className="flex flex-col gap-0.5">
-      {/* Timeline content */}
-      <div className="flex flex-col gap-1">
-        {assistant.timeline.map((entry, i) => (
-          <TimelineNode key={i} entry={entry} hasTimeline={hasTimelineEvents} />
-        ))}
-      </div>
+      {assistant.injectedContext && assistant.injectedContext.length > 0 && (
+        <ContextBanner items={assistant.injectedContext} />
+      )}
+      {timelineSteps.length > 0 && (
+        <TimelineTrack entries={timelineSteps} streamingStatus={assistant.status} onSubmitAnswer={onSubmitAnswer} />
+      )}
 
-      {/* Bottom-left: model name, status, timer */}
+      {textEntries.map((entry, i) => (
+        <TextNode key={i} entry={entry} />
+      ))}
+
       <div className="flex items-center gap-2 text-[10px] text-base-content/30">
         <span>{assistant.modelName}</span>
         <StatusBadge status={assistant.status} />
@@ -870,59 +1035,187 @@ function StreamingAssistantBlock({ assistant }: { assistant: StreamingAssistant 
   );
 }
 
-/* ── Timeline node ──────────────────────────────────────── */
+/* ── Context banner (injected notes) ────────────────────── */
 
-function TimelineNode({ entry, hasTimeline }: { entry: TimelineEntry; hasTimeline: boolean }) {
-  if (entry.kind === "thinking") return <ThinkingNode entry={entry} />;
-  if (entry.kind === "tool_call") return <ToolCallNode entry={entry} />;
-  return <TextNode entry={entry} indented={hasTimeline} />;
+function ContextBanner({ items }: { items: InjectedContextItem[] }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="flex flex-col gap-0.5 text-[11px] text-base-content/50">
+      <button
+        type="button"
+        className="flex items-center gap-1.5 hover:text-base-content/70 transition-colors w-fit"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <Files size={13} weight="duotone" />
+        <span>参考了 {items.length} 篇笔记</span>
+        <CaretDown size={10} className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
+      </button>
+      {expanded && (
+        <div className="pl-5 flex flex-col gap-0.5">
+          {items.map((item) => (
+            <div key={item.name} className="flex items-center gap-1 text-[10px] text-base-content/40">
+              <span className="truncate max-w-[200px]">{item.name}</span>
+              {item.snippet && (
+                <span className="truncate max-w-[300px] italic">{item.snippet}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
-/* ── Thinking ── */
+/* ── Timeline track (vertical dot+line) ─────────────────── */
 
-function ThinkingNode({ entry }: { entry: ThinkingEntry }) {
+function TimelineTrack({
+  entries,
+  streamingStatus,
+  onSubmitAnswer,
+}: {
+  entries: TimelineEntry[];
+  streamingStatus?: string;
+  onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
+}) {
+  return (
+    <div className="relative pl-5 py-1">
+      {/* Vertical line */}
+      <div className="absolute left-[7px] top-3 bottom-3 w-px bg-base-content/10" />
+
+      <div className="flex flex-col gap-0.5">
+        {entries.map((entry, i) => (
+          <TimelineStep
+            key={i}
+            entry={entry}
+            isLast={i === entries.length - 1}
+            streamingStatus={streamingStatus}
+            onSubmitAnswer={onSubmitAnswer}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Single timeline step (dot + content) ────────────────── */
+
+function TimelineStep({
+  entry,
+  isLast,
+  streamingStatus,
+  onSubmitAnswer,
+}: {
+  entry: TimelineEntry;
+  isLast: boolean;
+  streamingStatus?: string;
+  onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
+}) {
+  const dotIcon = timelineDotIcon(entry);
+
+  return (
+    <div className="relative flex items-start gap-2 min-h-[20px]">
+      {/* Dot */}
+      <div className="absolute -left-5 top-[3px] flex items-center justify-center w-[15px] h-[15px] rounded-full bg-base-100 z-[1]">
+        {dotIcon}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0">
+        <TimelineStepContent entry={entry} streamingStatus={streamingStatus} onSubmitAnswer={onSubmitAnswer} />
+      </div>
+    </div>
+  );
+}
+
+function timelineDotIcon(entry: TimelineEntry) {
+  switch (entry.kind) {
+    case "thinking":
+      return <Brain size={11} weight={entry.done ? "regular" : "fill"} className={entry.done ? "text-base-content/30" : "text-base-content/50 animate-pulse"} />;
+    case "tool_call":
+      return entry.done
+        ? <Wrench size={11} className="text-base-content/30" />
+        : <GearSix size={11} className="text-info/70 animate-spin" />;
+    case "reply":
+      return <ChatText size={11} className="text-base-content/30" />;
+    case "ask":
+      return <Lightning size={11} weight="fill" className="text-warning" />;
+    case "finish":
+      return <CheckCircle size={11} weight="fill" className="text-success" />;
+    default:
+      return <div className="w-1.5 h-1.5 rounded-full bg-base-content/20" />;
+  }
+}
+
+function TimelineStepContent({
+  entry,
+  streamingStatus,
+  onSubmitAnswer,
+}: {
+  entry: TimelineEntry;
+  streamingStatus?: string;
+  onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
+}) {
+  switch (entry.kind) {
+    case "thinking":
+      return <ThinkingContent entry={entry} />;
+    case "tool_call":
+      return <ToolCallContent entry={entry} />;
+    case "reply":
+      return <span className="text-xs text-base-content/60 leading-relaxed">{entry.message}</span>;
+    case "ask":
+      return <AskContent entry={entry} isWaiting={streamingStatus === "waiting"} onSubmitAnswer={onSubmitAnswer} />;
+    case "finish":
+      return <span className="text-xs text-success leading-relaxed">{entry.message}</span>;
+    default:
+      return null;
+  }
+}
+
+/* ── Thinking (collapsible) ─────────────────────────────── */
+
+function ThinkingContent({ entry }: { entry: ThinkingEntry }) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
 
-  /* Auto-collapse when this thinking segment finishes */
   useEffect(() => {
     if (entry.done && detailsRef.current) detailsRef.current.open = false;
   }, [entry.done]);
 
   return (
-    <details ref={detailsRef} open={!entry.done} className="ml-3 pl-3">
-      <summary className="text-xs text-base-content/50 hover:text-base-content/70 cursor-pointer select-none list-none flex items-center gap-1 [&::-webkit-details-marker]:hidden">
-        <CaretRight size={12} className="transition-transform [[open]>&]:rotate-90" />
-        <span>{entry.done ? "thinking" : "thinking…"}</span>
+    <details ref={detailsRef} open={!entry.done}>
+      <summary className="text-xs text-base-content/40 hover:text-base-content/60 cursor-pointer select-none list-none flex items-center gap-1 [&::-webkit-details-marker]:hidden leading-relaxed">
+        <CaretRight size={10} className="transition-transform [[open]>&]:rotate-90 shrink-0" />
+        <span>{entry.done ? "思考完成" : "思考中…"}</span>
       </summary>
-      <div className="text-xs text-base-content/40 mt-1 whitespace-pre-wrap max-h-40 overflow-y-auto">
+      <div className="text-xs text-base-content/30 mt-1 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed">
         {entry.content}
       </div>
     </details>
   );
 }
 
-/* ── Tool call ── */
+/* ── Tool call (collapsible args/result) ─────────────────── */
 
-function ToolCallNode({ entry }: { entry: ToolCallEntry }) {
+function ToolCallContent({ entry }: { entry: ToolCallEntry }) {
   const [open, setOpen] = useState(false);
+
   return (
-    <div className="ml-3 border-l-2 border-info/30 pl-3">
+    <div>
       <button
         type="button"
-        className="text-xs text-info/70 hover:text-info flex items-center gap-1"
+        className="text-xs text-base-content/50 hover:text-base-content/70 flex items-center gap-1 leading-relaxed"
         onClick={() => setOpen(!open)}
       >
-        <span>{entry.done ? "🔧" : "⏳"}</span>
         <span className="font-mono">{entry.name}</span>
         {!entry.done && <span className="loading loading-dots loading-xs" />}
+        <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
       </button>
       {open && (
         <div className="text-xs mt-1 space-y-1 max-h-40 overflow-y-auto">
-          <pre className="bg-base-200 rounded p-1.5 overflow-x-auto text-base-content/60">
+          <pre className="bg-base-200 rounded p-1.5 overflow-x-auto text-base-content/50 text-[11px]">
             {tryFormatJson(entry.args)}
           </pre>
           {entry.result && (
-            <pre className="bg-base-200 rounded p-1.5 overflow-x-auto text-base-content/60">
+            <pre className="bg-base-200 rounded p-1.5 overflow-x-auto text-base-content/50 text-[11px]">
               {tryFormatJson(entry.result)}
             </pre>
           )}
@@ -932,16 +1225,122 @@ function ToolCallNode({ entry }: { entry: ToolCallEntry }) {
   );
 }
 
-/* ── Text content ── */
+/* ── Text content (response body, outside timeline) ──────── */
 
-function TextNode({ entry, indented }: { entry: TextEntry; indented: boolean }) {
+function TextNode({ entry }: { entry: TextEntry }) {
   return (
-    <div className={indented ? "ml-3 pl-3" : ""}>
+    <div className="py-2">
       <div className="prose prose-sm max-w-none text-base-content [&_pre]:bg-base-200 [&_pre]:text-base-content/80 [&_code]:text-base-content/80">
         <Streamdown mode={entry.streaming ? "streaming" : "static"}>
           {entry.content}
         </Streamdown>
       </div>
+    </div>
+  );
+}
+
+/* ── Reply (progress message from agent) ─────────────────── */
+/* (handled inline in TimelineStepContent) */
+
+/* ── Ask (agent asks user a question) ────────────────────── */
+
+function AskContent({
+  entry,
+  isWaiting,
+  onSubmitAnswer,
+}: {
+  entry: AskEntry;
+  isWaiting: boolean;
+  onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
+}) {
+  const [selections, setSelections] = useState<Record<string, string | string[]>>({});
+
+  function toggleMulti(questionId: string, label: string) {
+    setSelections((prev) => {
+      const current = (prev[questionId] ?? []) as string[];
+      const next = current.includes(label)
+        ? current.filter((l) => l !== label)
+        : [...current, label];
+      return { ...prev, [questionId]: next };
+    });
+  }
+
+  function selectSingle(questionId: string, label: string) {
+    const updated = { ...selections, [questionId]: label };
+    setSelections(updated);
+    if (entry.questions.length === 1) {
+      onSubmitAnswer?.(updated);
+    }
+  }
+
+  function handleSubmitMulti() {
+    onSubmitAnswer?.(selections);
+  }
+
+  if (entry.resolved) {
+    return (
+      <div className="space-y-1.5">
+        {entry.questions.map((q) => (
+          <div key={q.id} className="flex flex-col gap-0.5">
+            <span className="text-xs text-base-content/60">{q.question}</span>
+            <div className="flex flex-wrap gap-1">
+              {(Array.isArray(entry.answers?.[q.id])
+                ? (entry.answers![q.id] as string[])
+                : [entry.answers?.[q.id]].filter(Boolean) as string[]
+              ).map((a) => (
+                <span key={a} className="badge badge-xs badge-primary">{a}</span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const interactive = isWaiting && !entry.resolved;
+  const hasMulti = entry.questions.some((q) => q.multi);
+
+  return (
+    <div className="space-y-2">
+      {entry.questions.map((q) => (
+        <div key={q.id} className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-base-content/70">{q.question}</span>
+          <div className="flex flex-wrap gap-1">
+            {q.options.map((opt) => {
+              const selected = q.multi
+                ? ((selections[q.id] ?? []) as string[]).includes(opt.label)
+                : selections[q.id] === opt.label;
+
+              return (
+                <button
+                  key={opt.label}
+                  type="button"
+                  className={`btn btn-xs btn-outline ${selected ? "btn-primary" : ""}`}
+                  disabled={!interactive}
+                  onClick={() =>
+                    q.multi
+                      ? toggleMulti(q.id, opt.label)
+                      : selectSingle(q.id, opt.label)
+                  }
+                  title={opt.description}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      {interactive && hasMulti && (
+        <button
+          type="button"
+          className="btn btn-xs btn-primary"
+          onClick={handleSubmitMulti}
+          disabled={Object.keys(selections).length === 0}
+        >
+          提交
+        </button>
+      )}
     </div>
   );
 }
@@ -954,19 +1353,27 @@ function StatusBadge({ status }: { status: string }) {
     thinking: "Thinking…",
     tool_call: "Using tools…",
     replying: "Replying…",
+    waiting: "Waiting",
     done: "",
     error: "Error",
   };
   const label = labels[status] ?? status;
   if (!label) return null;
 
+  const badgeClass =
+    status === "error"
+      ? "badge-error"
+      : status === "waiting"
+        ? "badge-warning"
+        : "badge-ghost";
+
   return (
-    <span
-      className={`badge badge-xs ${status === "error" ? "badge-error" : "badge-ghost"}`}
-    >
-      {status !== "done" && status !== "error" && (
+    <span className={`badge badge-xs ${badgeClass}`}>
+      {status === "waiting" ? (
+        <Hourglass size={10} className="mr-1" />
+      ) : status !== "done" && status !== "error" ? (
         <span className="loading loading-dots loading-xs mr-1" />
-      )}
+      ) : null}
       {label}
     </span>
   );
