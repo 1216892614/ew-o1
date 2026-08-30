@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as NotebookIdRouteImport } from './routes/notebook.$id'
+import { Route as NotebookIdEditorRouteImport } from './routes/notebook.$id_.editor'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -22,31 +23,40 @@ const NotebookIdRoute = NotebookIdRouteImport.update({
   path: '/notebook/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const NotebookIdEditorRoute = NotebookIdEditorRouteImport.update({
+  id: '/notebook/$id_/editor',
+  path: '/notebook/$id/editor',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/notebook/$id': typeof NotebookIdRoute
+  '/notebook/$id/editor': typeof NotebookIdEditorRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/notebook/$id': typeof NotebookIdRoute
+  '/notebook/$id/editor': typeof NotebookIdEditorRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/notebook/$id': typeof NotebookIdRoute
+  '/notebook/$id_/editor': typeof NotebookIdEditorRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/notebook/$id'
+  fullPaths: '/' | '/notebook/$id' | '/notebook/$id/editor'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/notebook/$id'
-  id: '__root__' | '/' | '/notebook/$id'
+  to: '/' | '/notebook/$id' | '/notebook/$id/editor'
+  id: '__root__' | '/' | '/notebook/$id' | '/notebook/$id_/editor'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   NotebookIdRoute: typeof NotebookIdRoute
+  NotebookIdEditorRoute: typeof NotebookIdEditorRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -65,12 +75,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NotebookIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/notebook/$id_/editor': {
+      id: '/notebook/$id_/editor'
+      path: '/notebook/$id/editor'
+      fullPath: '/notebook/$id/editor'
+      preLoaderRoute: typeof NotebookIdEditorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   NotebookIdRoute: NotebookIdRoute,
+  NotebookIdEditorRoute: NotebookIdEditorRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

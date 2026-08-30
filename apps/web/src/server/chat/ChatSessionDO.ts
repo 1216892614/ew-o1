@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
-import { chat, toServerSentEventsResponse, type StreamChunk } from "@tanstack/ai";
+import { chat, toServerSentEventsResponse, type StreamChunk, type AnyTool } from "@tanstack/ai";
 import { OpenAIChatCompletionsTextAdapter } from "@tanstack/ai-openai";
+import { searchNotebook } from "../utils/aiSearchSync";
 import type {
   ChatNode,
   UserNode,
@@ -18,7 +19,7 @@ import type {
   InjectedContextItem,
 } from "@/shared/chat-types";
 import { resolvePathToLeaf, findLatestLeaf } from "@/shared/chat-types";
-import { createAgentTools } from "./tools";
+import { createAgentTools, numberChunkLines } from "./tools";
 
 /* ── Persisted row shape in DO SQLite ──────────────────── */
 
@@ -171,6 +172,14 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       createdAt: now,
     };
 
+    /* Delete unanswered sibling user nodes (same parentId, no assistant child).
+     * This prevents empty user inputs from inflating version count. */
+    this.ctx.storage.sql.exec(
+      `DELETE FROM nodes WHERE role = 'user' AND parent_id IS ?
+       AND id NOT IN (SELECT DISTINCT parent_id FROM nodes WHERE role = 'assistant' AND parent_id IS NOT NULL)`,
+      body.parentId,
+    );
+
     this.ctx.storage.sql.exec(
       `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -208,53 +217,46 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       systemPrompts.push(body.systemPrompt);
     }
     const injectedContext: InjectedContextItem[] = [];
-    if (body.activeNotes && body.activeNotes.length > 0) {
+    const activeNoteIds = (body.activeNotes ?? []).map((n) => n.id);
+    if (body.activeNotes) {
       for (const note of body.activeNotes) {
-        injectedContext.push({
-          name: note.name,
-          snippet: (note.content ?? "").slice(0, 120),
-        });
+        injectedContext.push({ name: note.name, snippet: `file_id: ${note.id}` });
       }
-      const notesContext = body.activeNotes.map((n) => `## ${n.name}\n${n.content}`).join("\n\n---\n\n");
-      systemPrompts.push(
-        `You have access to the following notes from the user's notebook. Reference them when relevant:\n\n${notesContext}`,
-      );
     }
 
-    /* ── AI Search: auto-retrieve relevant context from notebook ── */
-    let aiSearchEntry: AiSearchEntry | null = null;
-    if (this.env.AI_SEARCH) {
+    const aiSearchEntries: AiSearchEntry[] = [];
+    const doAiSearch = async (query: string, round: number): Promise<string | null> => {
+      if (!this.env.AI_SEARCH) return null;
       try {
-        const searchInstance = this.env.AI_SEARCH.get(this.notebookId);
-        const searchResults = await searchInstance.search({
-          messages: [{ role: "user", content: body.message }],
-          ai_search_options: {
-            retrieval: { retrieval_type: "hybrid", max_num_results: 5 },
-          },
+        const chunks = await searchNotebook(this.env.AI_SEARCH, {
+          notebookId: this.notebookId,
+          query,
+          maxResults: 5,
+          noteIds: activeNoteIds.length > 0 ? activeNoteIds : undefined,
         });
-        if (searchResults.chunks && searchResults.chunks.length > 0) {
-          const resultItems: AiSearchResultItem[] = searchResults.chunks.map((chunk) => ({
-            fileId: (chunk.item.metadata?.id as string) ?? chunk.item.key ?? "",
-            filename: (chunk.item.metadata?.name as string) ?? chunk.item.key ?? "",
-            snippet: chunk.text.slice(0, 300),
-            score: chunk.score,
-          }));
-          aiSearchEntry = {
-            kind: "ai_search",
-            query: body.message,
-            results: resultItems,
-            round: 1,
-          };
-          const searchContext = resultItems
-            .map((r) => `### ${r.filename} (relevance: ${r.score.toFixed(2)})\n${r.snippet}`)
-            .join("\n\n---\n\n");
-          systemPrompts.push(
-            `AI Search found the following relevant passages from the notebook for the user's query:\n\n${searchContext}`,
-          );
-        }
+        if (chunks.length === 0) return null;
+        const resultItems: AiSearchResultItem[] = chunks.map((c) => ({
+          fileId: (c.item.metadata?.note_id as string) ?? c.item.key ?? "",
+          filename: (c.item.metadata?.filename as string) ?? c.item.key ?? "",
+          snippet: c.text.slice(0, 300),
+          score: c.score,
+        }));
+        aiSearchEntries.push({ kind: "ai_search", query, results: resultItems, round });
+        const formatted = await Promise.all(
+          resultItems.map(async (r) => {
+            const numbered = await numberChunkLines(this.env.DB, r.fileId, r.snippet);
+            return `### ${r.filename} (file_id: ${r.fileId}, relevance: ${r.score.toFixed(2)})\n${numbered}`;
+          }),
+        );
+        return formatted.join("\n\n---\n\n");
       } catch {
-        // AI Search unavailable; continue without it
+        return null;
       }
+    };
+
+    const round1Context = await doAiSearch(body.message, 1);
+    if (round1Context) {
+      systemPrompts.push(`refs:\n\n${round1Context}`);
     }
 
     const adapter = this.createAdapter(body.model);
@@ -272,6 +274,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
         get current() { return self.finishCalled; },
         set current(v) { self.finishCalled = v; },
       },
+      activeNoteIds,
     });
 
     const modelOptions: Record<string, unknown> = {};
@@ -288,25 +291,29 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       modelOptions.reasoning = { effort: body.modelParams.thinkingLevel };
     }
 
-    const stream = chat({
+    /* ── Multi-round agent loop with per-round AI Search ── */
+    const MAX_ROUNDS = 5;
+    const outerStream = this.multiRoundAgentLoop({
       adapter,
       messages: llmMessages,
-      systemPrompts: systemPrompts.length > 0 ? systemPrompts : undefined,
+      systemPrompts,
       tools,
-      agentLoopStrategy: ({ iterationCount }) => iterationCount < 5 && !this.finishCalled,
-      modelOptions: modelOptions as never,
+      modelOptions,
+      maxRounds: MAX_ROUNDS,
+      doAiSearch,
+      aiSearchEntries,
     });
 
     const assistantNodeId = nanoid();
     const teedStream = this.teeAndPersistAssistantResponse(
-      stream,
+      outerStream,
       assistantNodeId,
       userNodeId,
       body.modelName ?? body.model,
       body.modelProvider ?? "",
       body.model,
       injectedContext,
-      aiSearchEntry,
+      aiSearchEntries,
     );
 
     return toServerSentEventsResponse(teedStream, {
@@ -448,6 +455,93 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Drive multiple single-pass chat() rounds, injecting fresh AI Search
+   * context between rounds.  Round 1 uses the user query; subsequent rounds
+   * use the assistant's latest text output as the search query.
+   *
+   * Yields every StreamChunk from each inner chat() call so the outer
+   * teeAndPersist wrapper can forward them to the client unchanged.
+   */
+  private async *multiRoundAgentLoop(opts: {
+    adapter: unknown;
+    messages: { role: "user" | "assistant"; content: string }[];
+    systemPrompts: string[];
+    tools: AnyTool[];
+    modelOptions: Record<string, unknown>;
+    maxRounds: number;
+    doAiSearch: (query: string, round: number) => Promise<string | null>;
+    aiSearchEntries: AiSearchEntry[];
+  }): AsyncIterable<StreamChunk> {
+    const { adapter, messages, systemPrompts, tools, modelOptions, maxRounds, doAiSearch, aiSearchEntries } = opts;
+
+    const runningMessages = [...messages];
+    const baseSystemPrompts = [...systemPrompts];
+    let prevRoundHadToolCalls = false;
+
+    for (let round = 1; round <= maxRounds; round++) {
+      if (this.finishCalled) break;
+
+      let roundSystemPrompts = [...baseSystemPrompts];
+
+      // Only inject AI Search when the previous round was NOT tool calls.
+      // Tool-call rounds already fetched data; re-searching is redundant and slow.
+      if (round > 1 && !prevRoundHadToolCalls) {
+        let lastAssistantText = "";
+        for (let i = runningMessages.length - 1; i >= 0; i--) {
+          if (runningMessages[i].role === "assistant" && runningMessages[i].content) {
+            lastAssistantText = runningMessages[i].content.slice(0, 500);
+            break;
+          }
+        }
+        if (lastAssistantText) {
+          const prevLen = aiSearchEntries.length;
+          const ctx = await doAiSearch(lastAssistantText, round);
+          if (ctx) {
+            roundSystemPrompts = [
+              ...baseSystemPrompts,
+              `refs (round ${round}):\n\n${ctx}`,
+            ];
+            const newEntry = aiSearchEntries[aiSearchEntries.length - 1];
+            if (aiSearchEntries.length > prevLen && newEntry) {
+              yield { type: "CUSTOM", name: "ai_search", value: newEntry } as unknown as StreamChunk;
+            }
+          }
+        }
+      }
+
+      const innerStream = chat({
+        adapter: adapter as Parameters<typeof chat>[0]["adapter"],
+        messages: runningMessages,
+        systemPrompts: roundSystemPrompts.length > 0 ? roundSystemPrompts : undefined,
+        tools,
+        agentLoopStrategy: ({ iterationCount }) => iterationCount < 5 && !this.finishCalled,
+        modelOptions: modelOptions as never,
+      });
+
+      let roundAssistantText = "";
+      let hadToolCalls = false;
+
+      for await (const chunk of innerStream) {
+        const type = chunk.type as string;
+        if (type === "TEXT_MESSAGE_CONTENT") {
+          roundAssistantText += ((chunk as Record<string, unknown>).delta ?? "") as string;
+        }
+        if (type === "TOOL_CALL_START") {
+          hadToolCalls = true;
+        }
+        yield chunk;
+      }
+
+      if (roundAssistantText) {
+        runningMessages.push({ role: "assistant", content: roundAssistantText });
+      }
+
+      prevRoundHadToolCalls = hadToolCalls;
+      if (!hadToolCalls || this.finishCalled) break;
+    }
+  }
+
+  /**
    * Tee the SSE stream: yield each chunk to the client AND collect
    * a full timeline array to persist as one assistant node.
    * After stream ends → persist to DO SQLite + flush to R2.
@@ -460,22 +554,19 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     modelProvider: string,
     model: string,
     injectedContext: InjectedContextItem[],
-    aiSearchEntry: AiSearchEntry | null,
+    aiSearchEntries: AiSearchEntry[],
   ): AsyncIterable<StreamChunk> {
     /* Emit injected context as first event so client can display it */
     if (injectedContext.length > 0) {
-      yield { type: "CUSTOM", data: { type: "injected_context", items: injectedContext } } as unknown as StreamChunk;
+      yield { type: "CUSTOM", name: "injected_context", value: { items: injectedContext } } as unknown as StreamChunk;
     }
 
-    /* Emit AI Search results so client can display them in timeline */
-    if (aiSearchEntry) {
-      yield { type: "CUSTOM", data: { type: "ai_search", entry: aiSearchEntry } } as unknown as StreamChunk;
+    /* Emit round-1 AI Search results so client can display them in timeline */
+    for (const entry of aiSearchEntries) {
+      yield { type: "CUSTOM", name: "ai_search", value: entry } as unknown as StreamChunk;
     }
 
-    const timeline: TimelineEntry[] = [];
-    if (aiSearchEntry) {
-      timeline.push(aiSearchEntry);
-    }
+    const timeline: TimelineEntry[] = [...aiSearchEntries];
     const contentParts: string[] = [];
 
     for await (const chunk of stream) {
@@ -582,6 +673,13 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
         }
         case "TEXT_MESSAGE_END":
           break;
+        case "CUSTOM": {
+          const cd = chunk as Record<string, unknown>;
+          if (cd.name === "ai_search" && cd.value) {
+            timeline.push(cd.value as AiSearchEntry);
+          }
+          break;
+        }
         default:
           break;
       }

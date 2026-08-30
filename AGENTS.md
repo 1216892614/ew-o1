@@ -159,23 +159,33 @@ D1 不存消息体。DO SQLite 自动从旧 `messages` 表迁移到 `nodes` 表�
 
 ### search_file
 
-通过文件内容（仅 active 文件）或文件名搜索文件。
+搜索笔记文件和浏览分类。
 
 **参数**: `{ query: string, mode?: "content" | "name" }`
+
+**分类浏览**:
+- `query` 为 `"*"` 或 `""` → 列出所有分类名称（每个分类显示为 `"分类名/"`，type 为 `"category"`）
+- `query` 为 `"分类名/"` 或 `"分类名/*"` → 列出该分类下所有文件
+
+**搜索**:
+- 默认 `content` 模式: AI 语义搜索，返回相关文本片段及 relevance 评分 (0-1)
+- `name` 模式: 按文件名精确查找
+- 搜索结果同时包含匹配的文件（type `"file"`）和匹配的分类（type `"category"`，显示为 `"分类名/"`）
 
 **返回**: 搜索结果列表
 ```ts
 {
   results: Array<{
     file_id: string
-    filename: string
-    summary: string   // content 模式: 匹配 chunk; name 模式: 文件开头
+    filename: string    // 分类显示为 "分类名/", 文件显示原名
+    summary: string     // content 模式: 匹配 chunk; name 模式: 文件开头; 分类: "分类，包含 N 个文件"
     relevance?: number
+    type?: "file" | "category"
   }>
 }
 ```
 
-**实现**: content 模式走 AI Search binding; name 模式走 D1 LIKE 查询。
+**实现**: 分类浏览走 D1 categories 表查询; content 模式走 AI Search binding; name 模式走 D1 LIKE 查询。搜索时同时匹配 categories 表中的分类名。
 
 ### read_file
 
@@ -207,11 +217,114 @@ D1 不存消息体。DO SQLite 自动从旧 `messages` 表迁移到 `nodes` 表�
 
 ### edit_content
 
-通过 diff patch 修改文件内容。
+通过 unified diff 修改文件内容。agent 编写标准 unified diff 格式的 patch（`diff -u` / `git diff` 格式），服务端使用 `applyPatch`（npm `diff` 包）应用。
 
-**参数**: `{ file_id: string, patches: Array<{ start_line: number, end_line: number, content: string }> }`
+**参数**: `{ file_id: string, diff: string }`
 
-**返回**: `{ success: boolean, file_id: string }`
+- `file_id` — 目标文件 ID
+- `diff` — unified diff 文本，**只写 hunk（`@@` 行 + 上下文/增删行），不写 `--- a/` `+++ b/` 文件头**
+
+**返回**: `{ success: boolean, file_id: string, error?: string }`
+
+**diff 格式速查**:
+
+```
+@@ -起始行,行数 +起始行,行数 @@
+ 上下文行（空格开头，不变）
+-被删除的行（减号开头）
++新增的行（加号开头）
+```
+
+- 每个 hunk 以 `@@` 行开头，标注旧文件和新文件的行号范围
+- 上下文行（空格 ` ` 开头）用于定位，默认保留前后各 3 行
+- `-` 开头 = 删除，`+` 开头 = 新增
+- 多处修改 = 多个 `@@` hunk，按文件顺序排列
+- 服务端容忍 fuzzFactor=2（上下文允许 2 行偏移），但上下文越精确越好
+
+**示例**:
+
+假设 `read_file` 返回：
+
+```
+1: # 标题
+2: 第一段内容
+3: 第二段内容
+4: 第三段内容
+5: ## 小结
+```
+
+**① 替换 — 修改第 2 行**
+
+```json
+{
+  "file_id": "f_abc",
+  "diff": "@@ -1,5 +1,5 @@\n # 标题\n-第一段内容\n+修改后的第一段\n 第二段内容\n 第三段内容\n ## 小结"
+}
+```
+
+结果：
+```
+1: # 标题
+2: 修改后的第一段
+3: 第二段内容
+4: 第三段内容
+5: ## 小结
+```
+
+**② 插入 — 在第 1 行后插入新行**
+
+```json
+{
+  "file_id": "f_abc",
+  "diff": "@@ -1,3 +1,4 @@\n # 标题\n+新增导语\n 第一段内容\n 第二段内容"
+}
+```
+
+结果：
+```
+1: # 标题
+2: 新增导语
+3: 第一段内容
+4: 第二段内容
+5: 第三段内容
+6: ## 小结
+```
+
+**③ 删除 — 删除第 3-4 行**
+
+```json
+{
+  "file_id": "f_abc",
+  "diff": "@@ -2,4 +2,2 @@\n 第一段内容\n-第二段内容\n-第三段内容\n ## 小结"
+}
+```
+
+结果：
+```
+1: # 标题
+2: 第一段内容
+3: ## 小结
+```
+
+**④ 多 hunk — 同时修改第 2 行 + 删除第 4 行**
+
+```json
+{
+  "file_id": "f_abc",
+  "diff": "@@ -1,3 +1,3 @@\n # 标题\n-第一段内容\n+改写后的内容\n 第二段内容\n@@ -4,2 +4,1 @@\n-第三段内容\n ## 小结"
+}
+```
+
+结果：
+```
+1: # 标题
+2: 改写后的内容
+3: 第二段内容
+4: ## 小结
+```
+
+**注意**: diff 应用失败时（上下文不匹配），工具返回 `success: false` 和错误提示，agent 需重新 `read_file` 获取最新内容后重试。
+
 
 ### Hash 校验机制
 

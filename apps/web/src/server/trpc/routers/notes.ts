@@ -8,6 +8,8 @@ import {
   updateFileInNotebookToml,
   removeFileFromNotebookToml,
 } from "../../utils/r2Sync";
+import { upsertNoteToAiSearch, deleteNoteFromAiSearch } from "../../utils/aiSearchSync";
+import { recordSnapshot } from "../../utils/snapshot";
 
 export const notesRouter = router({
   getNotebook: publicProcedure
@@ -140,6 +142,26 @@ export const notesRouter = router({
         tag,
       });
 
+      // Index into AI Search (fire-and-forget, new file has empty content)
+      if (ctx.env.AI_SEARCH) {
+        upsertNoteToAiSearch(ctx.env.AI_SEARCH, {
+          notebookId: input.notebookId,
+          noteId: id,
+          filename: input.name,
+          content: "",
+        }).catch(() => {});
+      }
+
+      await recordSnapshot({
+        db: ctx.db,
+        notebookId: input.notebookId,
+        noteId: id,
+        action: "create_note",
+        summary: `创建文件「${input.name}」`,
+        source: "user",
+        afterData: { note: { id, notebookId: input.notebookId, name: input.name, content: "", categoryId: input.categoryId } },
+      });
+
       return { id };
     }),
 
@@ -164,6 +186,7 @@ export const notesRouter = router({
           .filter(Boolean).length;
       }
       updates.updatedAt = new Date();
+      const [beforeNote] = await ctx.db.select().from(notes).where(eq(notes.id, id)).limit(1);
       await ctx.db.update(notes).set(updates).where(eq(notes.id, id));
 
       // Sync R2 toml when name or categoryId changes
@@ -194,6 +217,42 @@ export const notesRouter = router({
           await updateFileInNotebookToml(ctx.env.R2, note.notebookId, id, tomlUpdates);
         }
       }
+
+      // Re-index in AI Search when content or name changes
+      const needsAiSearch = data.content !== undefined || data.name !== undefined;
+      if (needsAiSearch && ctx.env.AI_SEARCH) {
+        // Fetch full note for AI Search
+        const [full] = await ctx.db
+          .select({ notebookId: notes.notebookId, name: notes.name, content: notes.content })
+          .from(notes)
+          .where(eq(notes.id, id))
+          .limit(1);
+        if (full) {
+          upsertNoteToAiSearch(ctx.env.AI_SEARCH, {
+            notebookId: full.notebookId,
+            noteId: id,
+            filename: full.name,
+            content: full.content ?? "",
+          }).catch(() => {});
+        }
+      }
+
+      const [afterNote] = await ctx.db.select().from(notes).where(eq(notes.id, id)).limit(1);
+      const changedFields: string[] = [];
+      if (data.name !== undefined) changedFields.push(`重命名为「${data.name}」`);
+      if (data.content !== undefined) changedFields.push("修改内容");
+      if (data.categoryId !== undefined) changedFields.push("修改分类");
+      if (data.active !== undefined) changedFields.push(data.active ? "启用" : "停用");
+      await recordSnapshot({
+        db: ctx.db,
+        notebookId: beforeNote!.notebookId,
+        noteId: id,
+        action: data.content !== undefined ? "update_content" : "update_meta",
+        summary: changedFields.join("、") || "更新文件",
+        source: "user",
+        beforeData: { note: beforeNote },
+        afterData: { note: afterNote },
+      });
 
       return { id };
     }),
@@ -248,11 +307,30 @@ export const notesRouter = router({
         .from(notes)
         .where(eq(notes.id, input.id))
         .limit(1);
+      const [fullNote] = await ctx.db.select().from(notes).where(eq(notes.id, input.id)).limit(1);
 
       await ctx.db.delete(notes).where(eq(notes.id, input.id));
 
       if (note) {
         await removeFileFromNotebookToml(ctx.env.R2, note.notebookId, input.id);
+        // Remove from AI Search index
+        if (ctx.env.AI_SEARCH) {
+          deleteNoteFromAiSearch(ctx.env.AI_SEARCH, {
+            notebookId: note.notebookId,
+            noteId: input.id,
+          }).catch(() => {});
+        }
+      }
+      if (fullNote) {
+        await recordSnapshot({
+          db: ctx.db,
+          notebookId: fullNote.notebookId,
+          noteId: input.id,
+          action: "delete_note",
+          summary: `删除文件「${fullNote.name}」`,
+          source: "user",
+          beforeData: { note: fullNote },
+        });
       }
     }),
 

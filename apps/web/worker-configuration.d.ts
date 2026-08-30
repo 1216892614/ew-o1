@@ -26,7 +26,12 @@ declare namespace Cloudflare {
 
 interface AiSearchNamespace {
   get(instanceId: string): AiSearchInstance;
-  create(options: { id: string; metadata_fields?: { name: string; type: string }[] }): Promise<AiSearchInstance>;
+  create(options: {
+    id: string;
+    custom_metadata?: { field_name: string; data_type: "text" | "number" | "boolean" | "datetime" }[];
+    index_method?: { vector?: boolean; keyword?: boolean };
+    metadata_fields?: { name: string; type: string }[];
+  }): Promise<AiSearchInstance>;
   list(): Promise<{ result: { id: string }[] }>;
   delete(instanceId: string): Promise<void>;
 }

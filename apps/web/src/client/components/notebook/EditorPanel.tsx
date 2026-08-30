@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAtom } from "jotai";
 import { useDroppable } from "@dnd-kit/core";
-import { NotePencil, FolderSimple, CaretDown, Plus } from "@phosphor-icons/react";
+import { NotePencil, FolderSimple, CaretDown, Plus, X, ArrowSquareOut, PencilSimple, Eye } from "@phosphor-icons/react";
 import Editor from "@monaco-editor/react";
+import { Streamdown } from "streamdown";
 import { trpc } from "@/client/lib/trpc";
-import { openedNoteIdAtom } from "./state";
+import { openedNoteIdsAtom, activeNoteIdAtom } from "./state";
 
 interface EditorPanelProps {
   notebookId: string;
 }
 
 export function EditorPanel({ notebookId }: EditorPanelProps) {
-  const [openedNoteId, setOpenedNoteId] = useAtom(openedNoteIdAtom);
+  const [openedNoteIds, setOpenedNoteIds] = useAtom(openedNoteIdsAtom);
+  const [activeNoteId, setActiveNoteId] = useAtom(activeNoteIdAtom);
   const [theme, setTheme] = useState<"vs-dark" | "vs">("vs-dark");
+  const [viewMode, setViewMode] = useState<"edit" | "preview">("edit");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { setNodeRef, isOver } = useDroppable({ id: "editor-drop-zone" });
@@ -46,23 +49,23 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
     { enabled: !!notebookId },
   );
 
-  const openedNote = notes?.find((n) => n.id === openedNoteId) ?? null;
+  const activeNote = notes?.find((n) => n.id === activeNoteId) ?? null;
 
   const updateNote = trpc.notes.updateNote.useMutation();
 
   const handleChange = useCallback(
     (value: string | undefined) => {
-      if (!openedNoteId || value === undefined) return;
+      if (!activeNoteId || value === undefined) return;
 
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
       }
 
       debounceRef.current = setTimeout(() => {
-        updateNote.mutate({ id: openedNoteId, content: value });
+        updateNote.mutate({ id: activeNoteId, content: value });
       }, 500);
     },
-    [openedNoteId, updateNote],
+    [activeNoteId, updateNote],
   );
 
   // Cleanup debounce on unmount
@@ -74,54 +77,145 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
     };
   }, []);
 
-  // Handle drop: set opened note to dropped note id
-  useEffect(() => {
-    // This is handled via the parent DndContext onDragEnd
-    // The droppable registration here makes this a valid drop target
-  }, []);
+  const closeTab = useCallback(
+    (noteId: string, e?: React.MouseEvent) => {
+      e?.stopPropagation();
+      setOpenedNoteIds((prev) => {
+        const next = prev.filter((id) => id !== noteId);
+        // If closing the active tab, activate an adjacent one
+        if (activeNoteId === noteId) {
+          const idx = prev.indexOf(noteId);
+          const newActive = next[Math.min(idx, next.length - 1)] ?? null;
+          setActiveNoteId(newActive);
+        }
+        return next;
+      });
+    },
+    [activeNoteId, setOpenedNoteIds, setActiveNoteId],
+  );
+
+  const handlePopOut = useCallback(() => {
+    if (!activeNoteId) return;
+    const url = `/notebook/${notebookId}/editor?noteId=${activeNoteId}`;
+    window.open(url, `editor-${activeNoteId}`, "width=800,height=600");
+  }, [activeNoteId, notebookId]);
+
+  // Build tab data from opened IDs
+  const tabs = useMemo(() => {
+    if (!notes) return [];
+    return openedNoteIds
+      .map((id) => notes.find((n) => n.id === id))
+      .filter(Boolean) as typeof notes;
+  }, [openedNoteIds, notes]);
 
   return (
     <div
       ref={setNodeRef}
       className={`flex h-full flex-col ${isOver ? "ring-2 ring-primary/30" : ""}`}
     >
-      {/* Header */}
-      <div className="flex h-10 items-center border-b border-base-300 px-3 gap-2">
-        {openedNote ? (
-          <>
-            <span className="truncate text-sm font-medium flex-1 min-w-0">
-              {openedNote.name}
-            </span>
-            <CategoryCombobox
-              notebookId={notebookId}
-              noteId={openedNote.id}
-              currentCategoryId={openedNote.categoryId}
-            />
-          </>
-        ) : (
+      {/* Tab bar */}
+      {tabs.length > 0 ? (
+        <div className="flex h-10 items-center border-b border-base-300">
+          <div className="flex items-center flex-1 min-w-0 overflow-x-auto scrollbar-none">
+            {tabs.map((note) => (
+              <button
+                key={note.id}
+                type="button"
+                className={`group flex items-center gap-1.5 px-3 h-10 text-sm border-r border-base-300 shrink-0 max-w-[180px] transition-colors ${
+                  activeNoteId === note.id
+                    ? "bg-base-100 font-medium"
+                    : "bg-base-200/50 text-base-content/60 hover:bg-base-200"
+                }`}
+                onClick={() => setActiveNoteId(note.id)}
+              >
+                <span className="truncate text-xs">{note.name}</span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="opacity-0 group-hover:opacity-100 hover:text-error transition-opacity ml-auto"
+                  onClick={(e) => closeTab(note.id, e)}
+                  onKeyDown={(e) => e.key === "Enter" && closeTab(note.id)}
+                >
+                  <X size={12} />
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* Right actions */}
+          <div className="flex items-center gap-1 px-2 shrink-0 border-l border-base-300">
+            {activeNote && (
+              <CategoryCombobox
+                notebookId={notebookId}
+                noteId={activeNote.id}
+                currentCategoryId={activeNote.categoryId}
+              />
+            )}
+            {/* Edit / Preview toggle */}
+            <div className="join">
+              <button
+                type="button"
+                className={`btn btn-ghost btn-xs join-item tooltip tooltip-bottom ${viewMode === "edit" ? "btn-active" : ""}`}
+                data-tip="编辑"
+                onClick={() => setViewMode("edit")}
+              >
+                <PencilSimple size={14} />
+              </button>
+              <button
+                type="button"
+                className={`btn btn-ghost btn-xs join-item tooltip tooltip-bottom ${viewMode === "preview" ? "btn-active" : ""}`}
+                data-tip="预览"
+                onClick={() => setViewMode("preview")}
+              >
+                <Eye size={14} />
+              </button>
+            </div>
+            <button
+              type="button"
+              className="btn btn-ghost btn-xs btn-square tooltip tooltip-bottom"
+              data-tip="在新窗口打开"
+              onClick={handlePopOut}
+            >
+              <ArrowSquareOut size={14} />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex h-10 items-center border-b border-base-300 px-3">
           <span className="text-sm text-base-content/50">
             No file selected
           </span>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Editor area */}
-      <div className="flex-1">
-        {openedNote ? (
-          <Editor
-            height="100%"
-            language="markdown"
-            theme={theme}
-            value={openedNote.content ?? ""}
-            onChange={handleChange}
-            options={{
-              minimap: { enabled: false },
-              lineNumbers: "on",
-              wordWrap: "on",
-              fontSize: 14,
-              padding: { top: 16 },
-            }}
-          />
+      {/* Editor / Preview area */}
+      <div className="flex-1 overflow-hidden">
+        {activeNote ? (
+          viewMode === "edit" ? (
+            <Editor
+              key={activeNote.id}
+              height="100%"
+              language="markdown"
+              theme={theme}
+              value={activeNote.content ?? ""}
+              onChange={handleChange}
+              options={{
+                minimap: { enabled: false },
+                lineNumbers: "on",
+                wordWrap: "on",
+                fontSize: 14,
+                padding: { top: 16 },
+              }}
+            />
+          ) : (
+            <div className="h-full overflow-y-auto p-6">
+              <div className="prose prose-sm max-w-none text-base-content [&_pre]:bg-base-200 [&_pre]:text-base-content/80 [&_code]:text-base-content/80">
+                <Streamdown mode="static">
+                  {activeNote.content ?? ""}
+                </Streamdown>
+              </div>
+            </div>
+          )
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-base-content/30">
             <NotePencil size={48} weight="thin" />

@@ -120,7 +120,7 @@ export interface ChatRequestBody {
   modelProvider?: string;
   modelParams?: ModelParams;
   systemPrompt?: string;
-  activeNotes?: Array<{ name: string; content: string }>;
+  activeNotes?: Array<{ name: string; id: string }>;
 }
 
 /** GET /api/chat/messages response */
@@ -208,6 +208,8 @@ export function findLatestLeaf(nodes: ChatNode[]): string | null {
 
 /**
  * Get sibling count and index for version switching.
+ * User nodes without a persisted assistant response are excluded from version
+ * counting — they don't represent a real conversation branch yet.
  */
 export function getSiblingInfo(
   nodes: ChatNode[],
@@ -216,8 +218,21 @@ export function getSiblingInfo(
   const node = nodes.find((n) => n.id === nodeId);
   if (!node) return { siblings: [], index: -1 };
 
+  /* Set of user node IDs that have at least one assistant child */
+  const answeredUserIds = new Set(
+    nodes
+      .filter((n) => n.role === "assistant" && n.parentId)
+      .map((n) => n.parentId!),
+  );
+
   const siblings = nodes
-    .filter((n) => n.parentId === node.parentId && n.role === node.role)
+    .filter((n) => {
+      if (n.parentId !== node.parentId || n.role !== node.role) return false;
+      /* Keep the current node even if unanswered (so user sees their own input),
+       * but drop other unanswered user siblings — they don't count as versions. */
+      if (n.role === "user" && n.id !== nodeId && !answeredUserIds.has(n.id)) return false;
+      return true;
+    })
     .sort((a, b) => a.createdAt - b.createdAt);
 
   return { siblings, index: siblings.findIndex((s) => s.id === nodeId) };

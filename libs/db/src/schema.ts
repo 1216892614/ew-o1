@@ -53,3 +53,29 @@ export const sessions = sqliteTable("sessions", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
 
+export const snapshots = sqliteTable("snapshots", {
+  id: text("id").primaryKey(),
+  notebookId: text("notebook_id")
+    .notNull()
+    .references(() => notebooks.id, { onDelete: "cascade" }),
+  /** Which note was affected (null for notebook-level changes like toml) */
+  noteId: text("note_id").references(() => notes.id, { onDelete: "set null" }),
+  /** "create_note" | "update_content" | "update_meta" | "delete_note" | "batch_update" | "revert" */
+  action: text("action").notNull(),
+  /** Human-readable summary, e.g. "重命名为 xxx" or "回溯到版本 #3" */
+  summary: text("summary").notNull(),
+  /** "user" | "agent" */
+  source: text("source").notNull().default("user"),
+  /** If source=agent, the session name */
+  sessionName: text("session_name"),
+  /** If source=agent, the tool that triggered the change */
+  toolName: text("tool_name"),
+  /** JSON blob: snapshot of the state before the change */
+  beforeData: text("before_data"),
+  /** JSON blob: snapshot of the state after the change */
+  afterData: text("after_data"),
+  /** If this is a revert, which snapshot id it reverted to */
+  revertTargetId: text("revert_target_id"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+});
+

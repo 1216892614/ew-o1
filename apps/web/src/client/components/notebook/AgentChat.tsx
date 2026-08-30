@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, type KeyboardEvent } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import {
   ChatCircleDots,
@@ -80,6 +80,8 @@ interface AgentChatProps {
   onOpenModelSelector: () => void;
   onOpenSessionSelector: () => void;
   draggedNoteIds: string[];
+  droppedNoteIdsForChat: string[];
+  clearDroppedNoteIds: () => void;
   notesList: NoteItem[];
 }
 
@@ -111,6 +113,8 @@ export function AgentChat({
   onOpenModelSelector,
   onOpenSessionSelector,
   draggedNoteIds,
+  droppedNoteIdsForChat,
+  clearDroppedNoteIds,
   notesList,
 }: AgentChatProps) {
   const [allNodes, setAllNodes] = useState<ChatNode[]>([]);
@@ -120,11 +124,17 @@ export function AgentChat({
   const [attachedNoteIds, setAttachedNoteIds] = useState<Set<string>>(new Set());
   const [showAttachPopover, setShowAttachPopover] = useState(false);
   const [isCompressing, setIsCompressing] = useState(false);
+  const [compressMode, setCompressMode] = useState<"native" | "soft">(() => {
+    try {
+      const stored = localStorage.getItem("ew-compress-mode");
+      if (stored === "native" || stored === "soft") return stored;
+    } catch {}
+    return "native";
+  });
   const [isChatUploading, setIsChatUploading] = useState(false);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const prevDraggedRef = useRef<string[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const skipLoadHistoryRef = useRef(false);
   const streamingAssistantRef = useRef<StreamingAssistant | null>(null);
@@ -233,11 +243,11 @@ export function AgentChat({
   );
 
   useEffect(() => {
-    if (prevDraggedRef.current.length > 0 && draggedNoteIds.length === 0 && isOver) {
-      handleNoteDrop(prevDraggedRef.current);
+    if (droppedNoteIdsForChat.length > 0) {
+      handleNoteDrop(droppedNoteIdsForChat);
+      clearDroppedNoteIds();
     }
-    prevDraggedRef.current = draggedNoteIds;
-  }, [draggedNoteIds, isOver, handleNoteDrop]);
+  }, [droppedNoteIdsForChat, handleNoteDrop, clearDroppedNoteIds]);
 
   /* Auto-scroll */
   useEffect(() => {
@@ -288,8 +298,13 @@ export function AgentChat({
   );
 
   /* Compress conversation */
+  const updateCompressMode = useCallback((mode: "native" | "soft") => {
+    setCompressMode(mode);
+    try { localStorage.setItem("ew-compress-mode", mode); } catch {}
+  }, []);
+
   const handleCompress = useCallback(
-    async (mode: "native" | "soft") => {
+    async () => {
       if (!currentSessionId || isCompressing) return;
       setIsCompressing(true);
       try {
@@ -299,7 +314,7 @@ export function AgentChat({
           body: JSON.stringify({
             sessionId: currentSessionId,
             notebookId,
-            mode,
+            mode: compressMode,
             model: modelConfig.model.id,
             leafId,
           }),
@@ -309,9 +324,30 @@ export function AgentChat({
           supported?: boolean;
           summary?: string;
         };
-        if (mode === "native" && result.supported === false) {
+        if (compressMode === "native" && result.supported === false) {
           toast("当前模型不支持原生压缩，已回退到软压缩", { icon: "⚠️" });
-          await handleCompress("soft");
+          setIsCompressing(true);
+          const fallbackResp = await fetch("/api/chat/compress", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: currentSessionId,
+              notebookId,
+              mode: "soft",
+              model: modelConfig.model.id,
+              leafId,
+            }),
+          });
+          const fallbackResult = (await fallbackResp.json()) as {
+            success: boolean;
+            summary?: string;
+          };
+          if (!fallbackResult.success) {
+            toast.error(fallbackResult.summary ?? "压缩失败");
+            return;
+          }
+          toast.success("对话已压缩（软压缩）");
+          await loadHistory(notebookId, currentSessionId);
           return;
         }
         if (!result.success) {
@@ -326,7 +362,7 @@ export function AgentChat({
         setIsCompressing(false);
       }
     },
-    [currentSessionId, notebookId, modelConfig.model.id, leafId, isCompressing],
+    [currentSessionId, notebookId, modelConfig.model.id, leafId, isCompressing, compressMode],
   );
 
   /* ── Navigate to a different leaf ─────────────────────── */
@@ -389,7 +425,7 @@ export function AgentChat({
 
     const activeNotes = notesList
       .filter((n) => n.active && n.content)
-      .map((n) => ({ name: n.name, content: n.content ?? "" }));
+      .map((n) => ({ name: n.name, id: n.id }));
 
     /* Optimistic user node — shows immediately */
     const tempUserNodeId = `temp_${Date.now()}`;
@@ -673,16 +709,17 @@ export function AgentChat({
                 break;
               }
               case "CUSTOM": {
-                const data = evt.data as Record<string, unknown> | undefined;
-                if (data?.type === "injected_context" && Array.isArray(data.items)) {
+                const evtName = evt.name as string | undefined;
+                const evtValue = evt.value as Record<string, unknown> | undefined;
+                if (evtName === "injected_context" && evtValue && Array.isArray(evtValue.items)) {
                   updateStreaming((s) => ({
                     ...s,
-                    injectedContext: data.items as InjectedContextItem[],
+                    injectedContext: evtValue.items as InjectedContextItem[],
                   }));
                 }
-                if (data?.type === "ai_search" && data.entry) {
-                  const searchEntry = data.entry as AiSearchEntry;
-                  updateTimeline((tl) => [searchEntry, ...tl]);
+                if (evtName === "ai_search" && evtValue) {
+                  const searchEntry = evtValue as unknown as AiSearchEntry;
+                  updateTimeline((tl) => [...tl, searchEntry]);
                 }
                 break;
               }
@@ -810,6 +847,15 @@ export function AgentChat({
     renderNodes.push({ streaming: streamingAssistant, isStreaming: true });
   }
 
+  /* ── Detect pending ask from streaming timeline ────────── */
+  const pendingAsk = useMemo(() => {
+    if (!streamingAssistant || streamingAssistant.status !== "waiting") return null;
+    const askEntry = streamingAssistant.timeline.find(
+      (e): e is AskEntry => e.kind === "ask" && !e.resolved,
+    );
+    return askEntry ?? null;
+  }, [streamingAssistant]);
+
   /* ── Render ───────────────────────────────────────────── */
   return (
     <div ref={setNodeRef} className="flex flex-col flex-1 overflow-hidden relative">
@@ -882,20 +928,26 @@ export function AgentChat({
       )}
 
       {/* Input Area */}
+      {pendingAsk ? (
+        <AskInputPanel
+          entry={pendingAsk}
+          onSubmitAnswer={submitAskAnswer}
+        />
+      ) : (
       <div className="border-t border-base-300 shrink-0">
         {/* Toolbar row */}
-        <div className="flex items-center gap-1 px-3 pt-2 pb-1">
+        <div className="flex items-center gap-1.5 px-3 pt-2 pb-2">
           {/* Attach notes */}
           <div className="relative">
             <button
               type="button"
-              className={`btn btn-ghost btn-xs gap-1 ${attachedNoteIds.size > 0 ? "text-primary" : "text-base-content/40"}`}
+              className={`btn btn-ghost btn-sm gap-1 ${attachedNoteIds.size > 0 ? "text-primary" : "text-base-content/40"}`}
               onClick={() => setShowAttachPopover((v) => !v)}
               title="附加笔记"
             >
-              <Paperclip size={14} />
+              <Paperclip size={18} />
               {attachedNoteIds.size > 0 && (
-                <span className="badge badge-xs badge-primary">{attachedNoteIds.size}</span>
+                <span className="badge badge-sm badge-primary">{attachedNoteIds.size}</span>
               )}
             </button>
             {showAttachPopover && (
@@ -911,13 +963,13 @@ export function AgentChat({
                       return (
                         <div
                           key={noteId}
-                          className="flex items-center gap-2 text-xs px-1.5 py-1 rounded hover:bg-base-300"
+                          className="flex items-center gap-2 text-sm px-2 py-1.5 rounded hover:bg-base-300"
                         >
-                          <Files size={12} className="shrink-0" />
+                          <Files size={14} className="shrink-0" />
                           <span className="truncate flex-1">{note?.name ?? noteId}</span>
                           <button
                             type="button"
-                            className="btn btn-ghost btn-xs btn-circle"
+                            className="btn btn-ghost btn-sm btn-circle"
                             onClick={() =>
                               setAttachedNoteIds((prev) => {
                                 const next = new Set(prev);
@@ -926,7 +978,7 @@ export function AgentChat({
                               })
                             }
                           >
-                            <X size={10} />
+                            <X size={12} />
                           </button>
                         </div>
                       );
@@ -940,15 +992,15 @@ export function AgentChat({
           {/* Upload from chat */}
           <button
             type="button"
-            className="btn btn-ghost btn-xs text-base-content/40"
+            className="btn btn-ghost btn-sm text-base-content/40"
             onClick={() => chatFileInputRef.current?.click()}
             disabled={isChatUploading}
             title="上传文件并附加"
           >
             {isChatUploading ? (
-              <span className="loading loading-spinner loading-xs" />
+              <span className="loading loading-spinner loading-sm" />
             ) : (
-              <UploadSimple size={14} />
+              <UploadSimple size={18} />
             )}
           </button>
           <input
@@ -964,29 +1016,31 @@ export function AgentChat({
             }}
           />
 
-          {/* Compress conversation */}
-          <div className="dropdown dropdown-top">
-            <button
-              type="button"
-              className="btn btn-ghost btn-xs text-base-content/40"
-              disabled={!currentSessionId || isCompressing}
-              title="压缩对话"
-            >
-              {isCompressing ? (
-                <span className="loading loading-spinner loading-xs" />
-              ) : (
-                <ArrowsInSimple size={14} />
-              )}
-            </button>
-            <ul className="dropdown-content menu menu-xs bg-base-200 rounded-box shadow-lg z-20 w-32 mb-1">
-              <li>
-                <button onClick={() => handleCompress("native")}>原生压缩</button>
-              </li>
-              <li>
-                <button onClick={() => handleCompress("soft")}>软压缩</button>
-              </li>
-            </ul>
-          </div>
+          {/* Spacer */}
+          <div className="flex-1" />
+
+          {/* Compress conversation - right aligned */}
+          <select
+            className="select select-sm select-ghost text-base-content/40 w-auto"
+            value={compressMode}
+            onChange={(e) => updateCompressMode(e.target.value as "native" | "soft")}
+          >
+            <option value="native">原生压缩</option>
+            <option value="soft">软压缩</option>
+          </select>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm text-base-content/40"
+            disabled={!currentSessionId || isCompressing}
+            onClick={() => handleCompress()}
+            title="压缩对话"
+          >
+            {isCompressing ? (
+              <span className="loading loading-spinner loading-sm" />
+            ) : (
+              <ArrowsInSimple size={18} />
+            )}
+          </button>
         </div>
 
         {/* Textarea */}
@@ -994,7 +1048,7 @@ export function AgentChat({
           <textarea
             autoFocus
             ref={textareaRef}
-            className="textarea textarea-bordered w-full pr-12 resize-none"
+            className="textarea textarea-bordered w-full pr-12 resize-none rounded-xl"
             rows={1}
             style={{ maxHeight: "6rem" }}
             placeholder="输入消息..."
@@ -1023,6 +1077,7 @@ export function AgentChat({
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -1313,20 +1368,53 @@ function TimelineTrack({
   streamingStatus?: string;
   onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
 }) {
+  // Group consecutive tool_call entries with the same name
+  const grouped = useMemo(() => {
+    const result: (TimelineEntry | { kind: "tool_call_group"; name: string; calls: ToolCallEntry[] })[] = [];
+    let i = 0;
+    while (i < entries.length) {
+      const entry = entries[i];
+      if (entry.kind === "tool_call") {
+        const groupStart = i;
+        while (
+          i + 1 < entries.length &&
+          entries[i + 1].kind === "tool_call" &&
+          (entries[i + 1] as ToolCallEntry).name === entry.name
+        ) {
+          i++;
+        }
+        const groupEnd = i;
+        if (groupEnd > groupStart) {
+          // 2+ consecutive same-name tool calls → group
+          const calls = entries.slice(groupStart, groupEnd + 1) as ToolCallEntry[];
+          result.push({ kind: "tool_call_group", name: entry.name, calls });
+        } else {
+          result.push(entry);
+        }
+      } else {
+        result.push(entry);
+      }
+      i++;
+    }
+    return result;
+  }, [entries]);
+
   return (
     <div className="relative pl-5 py-1">
       {/* Vertical line */}
       <div className="absolute left-[7px] top-3 bottom-3 w-px bg-base-content/10" />
 
       <div className="flex flex-col gap-0.5">
-        {entries.map((entry, i) => (
-          <TimelineStep
-            key={i}
-            entry={entry}
-            isLast={i === entries.length - 1}
-            streamingStatus={streamingStatus}
-            onSubmitAnswer={onSubmitAnswer}
-          />
+        {grouped.map((entry, i) => (
+          entry.kind === "tool_call_group"
+            ? <ToolCallGroupStep key={i} group={entry} isLast={i === grouped.length - 1} />
+            : <TimelineStep
+                key={i}
+                entry={entry}
+                isLast={i === grouped.length - 1}
+                streamingStatus={streamingStatus}
+                onSubmitAnswer={onSubmitAnswer}
+              />
         ))}
       </div>
     </div>
@@ -1359,6 +1447,89 @@ function TimelineStep({
       <div className="flex-1 min-w-0">
         <TimelineStepContent entry={entry} streamingStatus={streamingStatus} onSubmitAnswer={onSubmitAnswer} />
       </div>
+    </div>
+  );
+}
+
+/* ── Grouped tool calls (consecutive same-name) ──────────── */
+
+function ToolCallGroupStep({
+  group,
+  isLast,
+}: {
+  group: { kind: "tool_call_group"; name: string; calls: ToolCallEntry[] };
+  isLast: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const runningCount = group.calls.filter((c) => !c.done).length;
+  const totalCount = group.calls.length;
+  const allDone = runningCount === 0;
+
+  const dotIcon = allDone
+    ? <Wrench size={11} className="text-base-content/30" />
+    : <GearSix size={11} className="text-info/70 animate-spin" />;
+
+  return (
+    <div className="relative flex items-start gap-2 min-h-[20px]">
+      {/* Dot */}
+      <div className="absolute -left-5 top-[3px] flex items-center justify-center w-[15px] h-[15px] rounded-full bg-base-100 z-[1]">
+        {dotIcon}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0">
+        <div>
+          <button
+            type="button"
+            className="text-xs text-base-content/50 hover:text-base-content/70 flex items-center gap-1 leading-relaxed"
+            onClick={() => setOpen(!open)}
+          >
+            <span className="font-mono">{group.name}</span>
+            <span className="text-base-content/30">
+              ({allDone ? `${totalCount}` : `${runningCount}运行中/${totalCount}`})
+            </span>
+            {!allDone && <span className="loading loading-dots loading-xs" />}
+            <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
+          </button>
+          {open && (
+            <div className="text-xs mt-1 space-y-2 max-h-60 overflow-y-auto">
+              {group.calls.map((call, i) => (
+                <ToolCallGroupItem key={call.toolCallId || i} entry={call} index={i} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ToolCallGroupItem({ entry, index }: { entry: ToolCallEntry; index: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-l border-base-content/10 pl-2">
+      <button
+        type="button"
+        className="text-[11px] text-base-content/40 hover:text-base-content/60 flex items-center gap-1"
+        onClick={() => setOpen(!open)}
+      >
+        <span className="text-base-content/30 truncate max-w-[200px]">{toolCallSummary(entry) || `#${index + 1}`}</span>
+        {!entry.done && <span className="loading loading-dots loading-xs" />}
+        {entry.done && <Check size={9} className="text-success/50" />}
+        <CaretRight size={9} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
+      </button>
+      {open && (
+        <div className="text-xs mt-1 space-y-1 max-h-40 overflow-y-auto">
+          <pre className="bg-base-200 rounded p-1.5 overflow-x-auto text-base-content/50 text-[11px]">
+            {tryFormatJson(entry.args)}
+          </pre>
+          {entry.result && (
+            <pre className="bg-base-200 rounded p-1.5 overflow-x-auto text-base-content/50 text-[11px]">
+              {tryFormatJson(entry.result)}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1403,7 +1574,7 @@ function TimelineStepContent({
     case "reply":
       return <span className="text-xs text-base-content/60 leading-relaxed">{entry.message}</span>;
     case "ask":
-      return <AskContent entry={entry} isWaiting={streamingStatus === "waiting"} onSubmitAnswer={onSubmitAnswer} />;
+      return <AskContent entry={entry} isWaiting={streamingStatus === "waiting"} />;
     case "finish":
       return <span className="text-xs text-success leading-relaxed">{entry.message}</span>;
     default:
@@ -1446,6 +1617,7 @@ function ToolCallContent({ entry }: { entry: ToolCallEntry }) {
         onClick={() => setOpen(!open)}
       >
         <span className="font-mono">{entry.name}</span>
+        {toolCallSummary(entry) && <span className="text-base-content/30 truncate max-w-[200px]">{toolCallSummary(entry)}</span>}
         {!entry.done && <span className="loading loading-dots loading-xs" />}
         <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
       </button>
@@ -1469,6 +1641,7 @@ function ToolCallContent({ entry }: { entry: ToolCallEntry }) {
 
 function AiSearchContent({ entry }: { entry: AiSearchEntry }) {
   const [open, setOpen] = useState(false);
+  const fileCount = entry.results.length;
 
   return (
     <div>
@@ -1477,19 +1650,30 @@ function AiSearchContent({ entry }: { entry: AiSearchEntry }) {
         className="text-xs text-base-content/50 hover:text-base-content/70 flex items-center gap-1 leading-relaxed"
         onClick={() => setOpen(!open)}
       >
-        <span>搜索了 {entry.results.length} 条相关内容</span>
+        <span className="font-mono">自动AI检索</span>
+        {entry.round > 1 && <span className="text-[10px] text-base-content/30">第{entry.round}轮</span>}
+        <span className="text-base-content/30">·</span>
+        <span>{fileCount} 个文件</span>
         <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
       </button>
       {open && (
-        <div className="text-xs mt-1 space-y-1.5 max-h-48 overflow-y-auto">
+        <div className="text-xs mt-1.5 space-y-1.5 max-h-60 overflow-y-auto">
+          {/* Search query */}
+          <div className="bg-base-200 rounded p-1.5 text-[11px] text-base-content/40">
+            <span className="text-base-content/50 font-medium">query: </span>
+            <span className="break-all">{entry.query}</span>
+          </div>
+          {/* Result files */}
           {entry.results.map((item, i) => (
             <div key={`${item.fileId}-${i}`} className="bg-base-200 rounded p-2">
               <div className="flex items-center gap-1.5 text-base-content/60 mb-0.5">
                 <Files size={10} weight="duotone" />
                 <span className="font-medium truncate max-w-[200px]">{item.filename}</span>
-                <span className="text-[10px] text-base-content/30 ml-auto">{(item.score * 100).toFixed(0)}%</span>
+                <span className="text-[10px] text-base-content/30 ml-auto">
+                  相关度 {(item.score * 100).toFixed(0)}%
+                </span>
               </div>
-              <p className="text-[11px] text-base-content/40 line-clamp-3 leading-relaxed">
+              <p className="text-[11px] text-base-content/40 line-clamp-4 leading-relaxed whitespace-pre-wrap">
                 {item.snippet}
               </p>
             </div>
@@ -1522,36 +1706,11 @@ function TextNode({ entry }: { entry: TextEntry }) {
 function AskContent({
   entry,
   isWaiting,
-  onSubmitAnswer,
 }: {
   entry: AskEntry;
   isWaiting: boolean;
   onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
 }) {
-  const [selections, setSelections] = useState<Record<string, string | string[]>>({});
-
-  function toggleMulti(questionId: string, label: string) {
-    setSelections((prev) => {
-      const current = (prev[questionId] ?? []) as string[];
-      const next = current.includes(label)
-        ? current.filter((l) => l !== label)
-        : [...current, label];
-      return { ...prev, [questionId]: next };
-    });
-  }
-
-  function selectSingle(questionId: string, label: string) {
-    const updated = { ...selections, [questionId]: label };
-    setSelections(updated);
-    if (entry.questions.length === 1) {
-      onSubmitAnswer?.(updated);
-    }
-  }
-
-  function handleSubmitMulti() {
-    onSubmitAnswer?.(selections);
-  }
-
   if (entry.resolved) {
     return (
       <div className="space-y-1.5">
@@ -1572,30 +1731,123 @@ function AskContent({
     );
   }
 
-  const interactive = isWaiting && !entry.resolved;
-  const hasMulti = entry.questions.some((q) => q.multi);
+  // Pending — show a hint that the input area below has the ask UI
+  return (
+    <div className="text-xs text-warning/80 flex items-center gap-1">
+      <Hourglass size={12} weight="fill" className="animate-pulse" />
+      <span>等待回答...</span>
+    </div>
+  );
+}
+
+/* ── Ask input panel (replaces input area when ask is pending) ── */
+
+function AskInputPanel({
+  entry,
+  onSubmitAnswer,
+}: {
+  entry: AskEntry;
+  onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
+}) {
+  const [activeTab, setActiveTab] = useState(0);
+  const [selections, setSelections] = useState<Record<string, string | string[]>>({});
+  const [freeText, setFreeText] = useState("");
+  const questions = entry.questions;
+  const singleQuestion = questions.length === 1;
+  const currentQ = questions[activeTab];
+
+  function toggleMulti(questionId: string, label: string) {
+    setSelections((prev) => {
+      const current = (prev[questionId] ?? []) as string[];
+      const next = current.includes(label)
+        ? current.filter((l) => l !== label)
+        : [...current, label];
+      return { ...prev, [questionId]: next };
+    });
+  }
+
+  function selectSingle(questionId: string, label: string) {
+    setSelections((prev) => {
+      const current = prev[questionId];
+      // Toggle off if already selected
+      if (current === label) {
+        const next = { ...prev };
+        delete next[questionId];
+        return next;
+      }
+      return { ...prev, [questionId]: label };
+    });
+  }
+
+  function handleSubmit() {
+    // Build answers: use freeText as override if provided, otherwise use selections
+    const answers: Record<string, string | string[]> = {};
+    for (const q of questions) {
+      if (freeText.trim() && singleQuestion) {
+        // For single question, free text overrides selection
+        answers[q.id] = freeText.trim();
+      } else {
+        answers[q.id] = selections[q.id] ?? "";
+      }
+    }
+    onSubmitAnswer?.(answers);
+  }
+
+  function handleFreeTextKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  }
+
+  const hasAnswer = singleQuestion
+    ? !!(freeText.trim() || selections[currentQ?.id])
+    : questions.every((q) => {
+        const sel = selections[q.id];
+        return sel && (typeof sel === "string" ? sel.length > 0 : sel.length > 0);
+      });
 
   return (
-    <div className="space-y-2">
-      {entry.questions.map((q) => (
-        <div key={q.id} className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-base-content/70">{q.question}</span>
-          <div className="flex flex-wrap gap-1">
-            {q.options.map((opt) => {
-              const selected = q.multi
-                ? ((selections[q.id] ?? []) as string[]).includes(opt.label)
-                : selections[q.id] === opt.label;
+    <div className="border-t border-warning/30 bg-warning/5 shrink-0">
+      {/* Tab navigation for multiple questions */}
+      {!singleQuestion && (
+        <div className="flex items-center gap-0.5 px-3 pt-2 overflow-x-auto">
+          {questions.map((q, i) => {
+            const answered = !!selections[q.id];
+            return (
+              <button
+                key={q.id}
+                type="button"
+                className={`btn btn-xs ${activeTab === i ? "btn-warning" : answered ? "btn-ghost text-success" : "btn-ghost text-base-content/40"}`}
+                onClick={() => setActiveTab(i)}
+              >
+                {answered && <Check size={10} className="text-success" />}
+                <span className="truncate max-w-[120px]">问题 {i + 1}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Current question + options */}
+      {currentQ && (
+        <div className="px-3 pt-2 pb-1">
+          <div className="text-sm font-medium text-base-content/80 mb-2">{currentQ.question}</div>
+          <div className="flex flex-wrap gap-1.5">
+            {currentQ.options.map((opt) => {
+              const selected = currentQ.multi
+                ? ((selections[currentQ.id] ?? []) as string[]).includes(opt.label)
+                : selections[currentQ.id] === opt.label;
 
               return (
                 <button
                   key={opt.label}
                   type="button"
-                  className={`btn btn-xs btn-outline ${selected ? "btn-primary" : ""}`}
-                  disabled={!interactive}
+                  className={`btn btn-sm ${selected ? "btn-warning" : "btn-outline btn-ghost"}`}
                   onClick={() =>
-                    q.multi
-                      ? toggleMulti(q.id, opt.label)
-                      : selectSingle(q.id, opt.label)
+                    currentQ.multi
+                      ? toggleMulti(currentQ.id, opt.label)
+                      : selectSingle(currentQ.id, opt.label)
                   }
                   title={opt.description}
                 >
@@ -1605,17 +1857,56 @@ function AskContent({
             })}
           </div>
         </div>
-      ))}
-      {interactive && hasMulti && (
-        <button
-          type="button"
-          className="btn btn-xs btn-primary"
-          onClick={handleSubmitMulti}
-          disabled={Object.keys(selections).length === 0}
-        >
-          提交
-        </button>
       )}
+
+      {/* Free text input + submit */}
+      <div className="px-3 pb-3 pt-1 flex items-end gap-2">
+        <textarea
+          autoFocus
+          className="textarea textarea-bordered flex-1 resize-none rounded-xl text-sm"
+          rows={1}
+          style={{ maxHeight: "4rem" }}
+          placeholder="用自然语言回答或补充说明..."
+          value={freeText}
+          onChange={(e) => setFreeText(e.target.value)}
+          onKeyDown={handleFreeTextKeyDown}
+          onInput={(e) => {
+            const target = e.target as HTMLTextAreaElement;
+            target.style.height = "auto";
+            target.style.height = `${Math.min(target.scrollHeight, 64)}px`;
+          }}
+        />
+        {singleQuestion ? (
+          <button
+            type="button"
+            className="btn btn-warning btn-sm"
+            disabled={!hasAnswer}
+            onClick={handleSubmit}
+          >
+            <Check size={14} weight="bold" />
+            回答完毕
+          </button>
+        ) : activeTab < questions.length - 1 ? (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => setActiveTab((t) => Math.min(t + 1, questions.length - 1))}
+          >
+            下一题
+            <CaretRight size={14} />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-warning btn-sm"
+            disabled={!hasAnswer}
+            onClick={handleSubmit}
+          >
+            <Check size={14} weight="bold" />
+            回答完毕
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1683,6 +1974,47 @@ function ElapsedTimer({ startTime, running }: { startTime: number; running: bool
 }
 
 /* ── Util ── */
+
+/** Extract a short human-readable summary from tool call args for inline preview */
+function toolCallSummary(entry: ToolCallEntry): string {
+  try {
+    const args = JSON.parse(entry.args);
+    switch (entry.name) {
+      case "search_file":
+        return args.query ? `"${args.query}"` : "";
+      case "read_file": {
+        // Try to extract filename from the tool result
+        let label = "";
+        if (entry.result) {
+          try {
+            const res = JSON.parse(entry.result);
+            if (res.filename && res.filename !== "NOT_FOUND") label = res.filename;
+          } catch {}
+        }
+        if (!label) label = (args.file_id ?? "").slice(0, 8);
+        const range = args.line_start && args.line_end ? ` L${args.line_start}-${args.line_end}` : args.line_start ? ` L${args.line_start}+` : "";
+        return label + range;
+      }
+      case "edit_file":
+        return [args.new_filename, args.new_tag].filter(Boolean).join(" → ") || (args.file_id ?? "").slice(0, 8);
+      case "edit_content": {
+        const hunks = typeof args.diff === "string" ? (args.diff.match(/^@@/gm) ?? []).length : 0;
+        return `${hunks} hunk${hunks !== 1 ? "s" : ""}`;
+      }
+      case "web_search":
+        return args.query ? `"${args.query}"` : "";
+      case "web_page_read":
+        return args.url ? new URL(args.url).hostname : "";
+      default: {
+        // Generic: pick the first short string value
+        const vals = Object.values(args).filter((v): v is string => typeof v === "string" && v.length > 0 && v.length < 60);
+        return vals[0] ?? "";
+      }
+    }
+  } catch {
+    return "";
+  }
+}
 
 function tryFormatJson(str: string): string {
   try {

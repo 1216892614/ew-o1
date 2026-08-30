@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { applyPatch } from "diff";
 import type { AnyTool } from "@tanstack/ai";
+import { upsertNoteToAiSearch, searchNotebook } from "../utils/aiSearchSync";
 
 function tool<TInput extends z.ZodType, TOutput extends z.ZodType>(def: {
   name: string;
@@ -17,7 +19,10 @@ interface CreateAgentToolsParams {
   contentHashMap: Map<string, string>;
   askResolverRef: { current: { resolve: (v: unknown) => void } | null };
   finishFlagRef: { current: boolean };
+  activeNoteIds: string[];
 }
+
+/* ── Shared helpers ─────────────────────────────────────── */
 
 async function sha256Hex(content: string): Promise<string> {
   const encoded = new TextEncoder().encode(content);
@@ -30,95 +35,255 @@ async function sha256Hex(content: string): Promise<string> {
   return hex;
 }
 
+function numberLines(content: string, startLine = 1): string {
+  return content
+    .split("\n")
+    .map((line, i) => `${startLine + i}: ${line}`)
+    .join("\n");
+}
+
+async function numberChunkLines(
+  db: D1Database,
+  noteId: string,
+  chunkText: string,
+): Promise<string> {
+  const row = await db
+    .prepare("SELECT content FROM notes WHERE id = ?")
+    .bind(noteId)
+    .first<{ content: string }>();
+  if (!row?.content) return chunkText;
+  const clean = chunkText.replace(/\r/g, "");
+  const idx = row.content.indexOf(clean);
+  if (idx === -1) return chunkText;
+  const startLine = row.content.slice(0, idx).split("\n").length;
+  return numberLines(clean, startLine);
+}
+
+async function verifyHash(
+  db: D1Database,
+  fileId: string,
+  contentHashMap: Map<string, string>,
+): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  const expected = contentHashMap.get(fileId);
+  if (!expected) {
+    return { ok: false, error: "File not read yet. Call read_file first." };
+  }
+  const row = await db
+    .prepare("SELECT content FROM notes WHERE id = ?")
+    .bind(fileId)
+    .first<{ content: string }>();
+  if (!row) {
+    return { ok: false, error: "File not found." };
+  }
+  const actual = await sha256Hex(row.content ?? "");
+  if (actual !== expected) {
+    return { ok: false, error: "Content changed since last read. Re-read the file." };
+  }
+  return { ok: true, content: row.content ?? "" };
+}
+
+type SearchResult = {
+  file_id: string;
+  filename: string;
+  summary: string;
+  relevance?: number;
+  type?: "file" | "category";
+};
+
+/* ── Tool factory ───────────────────────────────────────── */
+
 export function createAgentTools(params: CreateAgentToolsParams) {
-  const { env, notebookId, contentHashMap, askResolverRef, finishFlagRef } = params;
+  const { env, notebookId, contentHashMap, askResolverRef, finishFlagRef, activeNoteIds } = params;
+  const db = env.DB;
+
+  /* ── Category queries ─────────────────────────────────── */
+
+  async function listCategories(): Promise<SearchResult[]> {
+    const cats = await db
+      .prepare(
+        `SELECT c.id, c.name,
+           (SELECT COUNT(*) FROM notes n WHERE n.category_id = c.id AND n.archived = 0) AS file_count
+         FROM categories c
+         WHERE c.notebook_id = ? AND c.is_archive = 0
+         ORDER BY c.position`,
+      )
+      .bind(notebookId)
+      .all<{ id: string; name: string; file_count: number }>();
+    return (cats.results ?? []).map((c) => ({
+      file_id: c.id,
+      filename: `${c.name}/`,
+      summary: `分类，包含 ${c.file_count} 个文件`,
+      type: "category" as const,
+    }));
+  }
+
+  async function listCategoryFiles(catName: string): Promise<SearchResult[]> {
+    const cat = await db
+      .prepare("SELECT id FROM categories WHERE name = ? AND notebook_id = ?")
+      .bind(catName, notebookId)
+      .first<{ id: string }>();
+    if (!cat) return [];
+    const rows = await db
+      .prepare(
+        "SELECT id, name, content FROM notes WHERE category_id = ? AND notebook_id = ? AND archived = 0 ORDER BY position LIMIT 50",
+      )
+      .bind(cat.id, notebookId)
+      .all<{ id: string; name: string; content: string }>();
+    return (rows.results ?? []).map((r) => ({
+      file_id: r.id,
+      filename: r.name,
+      summary: numberLines((r.content ?? "").split("\n").slice(0, 5).join("\n")),
+      type: "file" as const,
+    }));
+  }
+
+  async function matchCategories(query: string, limit = 5): Promise<SearchResult[]> {
+    const cats = await db
+      .prepare(
+        `SELECT c.id, c.name,
+           (SELECT COUNT(*) FROM notes n WHERE n.category_id = c.id AND n.archived = 0) AS file_count
+         FROM categories c
+         WHERE c.notebook_id = ? AND c.name LIKE ? AND c.is_archive = 0
+         LIMIT ?`,
+      )
+      .bind(notebookId, `%${query}%`, limit)
+      .all<{ id: string; name: string; file_count: number }>();
+    return (cats.results ?? []).map((c) => ({
+      file_id: c.id,
+      filename: `${c.name}/`,
+      summary: `分类，包含 ${c.file_count} 个文件`,
+      type: "category" as const,
+    }));
+  }
+
+  /* ── Note search ──────────────────────────────────────── */
+
+  async function searchByName(query: string): Promise<SearchResult[]> {
+    const [catResults, noteRows] = await Promise.all([
+      matchCategories(query, 10),
+      db
+        .prepare(
+          "SELECT id, name, content FROM notes WHERE notebook_id = ? AND name LIKE ? AND archived = 0 LIMIT 10",
+        )
+        .bind(notebookId, `%${query}%`)
+        .all<{ id: string; name: string; content: string }>(),
+    ]);
+    const notes: SearchResult[] = (noteRows.results ?? []).map((r) => ({
+      file_id: r.id,
+      filename: r.name,
+      summary: numberLines((r.content ?? "").split("\n").slice(0, 5).join("\n")),
+      type: "file" as const,
+    }));
+    return [...catResults, ...notes];
+  }
+
+  async function searchByContent(query: string): Promise<SearchResult[]> {
+    const catResults = await matchCategories(query);
+
+    if (env.AI_SEARCH) {
+      try {
+        const chunks = await searchNotebook(env.AI_SEARCH, {
+          notebookId,
+          query,
+          maxResults: 10,
+          noteIds: activeNoteIds.length > 0 ? activeNoteIds : undefined,
+        });
+        if (chunks.length > 0) {
+          const items = await Promise.all(
+            chunks.map(async (chunk) => {
+              const noteId = (chunk.item.metadata?.note_id as string) ?? chunk.item.key ?? "";
+              const summary = await numberChunkLines(db, noteId, chunk.text.slice(0, 200));
+              return {
+                file_id: noteId,
+                filename: (chunk.item.metadata?.filename as string) ?? chunk.item.key ?? "",
+                summary,
+                relevance: chunk.score,
+                type: "file" as const,
+              };
+            }),
+          );
+          return [...catResults, ...items];
+        }
+      } catch {
+        /* fall through to D1 */
+      }
+    }
+
+    const rows = await db
+      .prepare(
+        "SELECT id, name, content FROM notes WHERE notebook_id = ? AND content LIKE ? AND archived = 0 LIMIT 10",
+      )
+      .bind(notebookId, `%${query}%`)
+      .all<{ id: string; name: string; content: string }>();
+    const notes: SearchResult[] = (rows.results ?? []).map((r) => ({
+      file_id: r.id,
+      filename: r.name,
+      summary: numberLines((r.content ?? "").split("\n").slice(0, 5).join("\n")),
+      type: "file" as const,
+    }));
+    return [...catResults, ...notes];
+  }
+
+  /* ── Tools array ──────────────────────────────────────── */
+
+  const searchResultSchema = z.object({
+    results: z.array(
+      z.object({
+        file_id: z.string(),
+        filename: z.string(),
+        summary: z.string(),
+        relevance: z.number().optional(),
+        type: z.enum(["file", "category"]).optional(),
+      }),
+    ),
+  });
 
   return [
     tool({
       name: "search_file",
       description:
-        "Search for files in the notebook by name or content. Use 'name' mode to find files by filename, 'content' mode to search within file contents.",
+        "Search notebook notes and browse categories.\n" +
+        "Category browsing:\n" +
+        '  - query "*" or "" → list all category names.\n' +
+        '  - query "分类名/" → list all files inside that category.\n' +
+        "Search:\n" +
+        "  - Default mode 'content': AI semantic search returning relevant chunks with line numbers and relevance score.\n" +
+        "  - Mode 'name': filename lookup.\n" +
+        "Results include files (type 'file') and categories (type 'category').",
       inputSchema: z.object({
-        query: z.string().describe("Search query"),
-        mode: z.enum(["content", "name"]).optional().describe("Search mode: 'name' for filename search, 'content' for full-text search. Defaults to content."),
+        query: z.string().describe("Search query, category browse pattern, or keywords"),
+        mode: z
+          .enum(["content", "name"])
+          .optional()
+          .describe("Defaults to 'content' (AI semantic search). Use 'name' for filename lookup."),
       }),
-      outputSchema: z.object({
-        results: z.array(
-          z.object({
-            file_id: z.string(),
-            filename: z.string(),
-            summary: z.string(),
-            relevance: z.number().optional(),
-          }),
-        ),
-      }),
+      outputSchema: searchResultSchema,
       execute: async (args) => {
+        const query = args.query.trim();
+
+        if (query === "*" || query === "") {
+          return { results: await listCategories() };
+        }
+
+        const catBrowse = query.match(/^(.+?)\/\*?$/);
+        if (catBrowse) {
+          return { results: await listCategoryFiles(catBrowse[1]) };
+        }
+
         const mode = args.mode ?? "content";
-
-        if (mode === "name") {
-          const rows = await env.DB.prepare(
-            "SELECT id, name, content FROM notes WHERE notebook_id = ? AND name LIKE ? AND archived = 0 LIMIT 10",
-          )
-            .bind(notebookId, `%${args.query}%`)
-            .all<{ id: string; name: string; content: string }>();
-
-          return {
-            results: (rows.results ?? []).map((r) => ({
-              file_id: r.id,
-              filename: r.name,
-              summary: (r.content ?? "").slice(0, 100),
-            })),
-          };
-        }
-
-        if (env.AI_SEARCH) {
-          try {
-            const instance = env.AI_SEARCH.get(notebookId);
-            const searchResults = await instance.search({
-              messages: [{ role: "user", content: args.query }],
-              ai_search_options: {
-                retrieval: { retrieval_type: "hybrid", max_num_results: 10 },
-              },
-            });
-            if (searchResults.chunks && searchResults.chunks.length > 0) {
-              return {
-                results: searchResults.chunks.map((chunk) => ({
-                  file_id: ((chunk.item.metadata?.id as string) ?? chunk.item.key ?? ""),
-                  filename: ((chunk.item.metadata?.name as string) ?? chunk.item.key ?? ""),
-                  summary: chunk.text.slice(0, 200),
-                  relevance: chunk.score,
-                })),
-              };
-            }
-          } catch {
-            // Fall through to D1 fallback
-          }
-        }
-
-        const rows = await env.DB.prepare(
-          "SELECT id, name, content FROM notes WHERE notebook_id = ? AND content LIKE ? AND archived = 0 LIMIT 10",
-        )
-          .bind(notebookId, `%${args.query}%`)
-          .all<{ id: string; name: string; content: string }>();
-
-        return {
-          results: (rows.results ?? []).map((r) => ({
-            file_id: r.id,
-            filename: r.name,
-            summary: (r.content ?? "").slice(0, 100),
-          })),
-        };
+        const results = mode === "name" ? await searchByName(query) : await searchByContent(query);
+        return { results };
       },
     }),
 
     tool({
       name: "read_file",
       description:
-        "Read the content of a file by its ID. Returns numbered lines. If no line range is specified, returns the first 50 lines.",
+        "Read file content by ID. Returns numbered lines. Without line range, returns the first 50 lines.",
       inputSchema: z.object({
-        file_id: z.string().describe("The file ID to read"),
-        line_start: z.number().optional().describe("Starting line number (1-based)"),
-        line_end: z.number().optional().describe("Ending line number (inclusive)"),
+        file_id: z.string().describe("File ID"),
+        line_start: z.number().optional().describe("Start line (1-based)"),
+        line_end: z.number().optional().describe("End line (inclusive)"),
       }),
       outputSchema: z.object({
         file_id: z.string(),
@@ -127,102 +292,98 @@ export function createAgentTools(params: CreateAgentToolsParams) {
         content: z.string(),
       }),
       execute: async (args) => {
-        const row = await env.DB.prepare("SELECT id, name, content FROM notes WHERE id = ?")
+        const row = await db
+          .prepare("SELECT id, name, content FROM notes WHERE id = ?")
           .bind(args.file_id)
           .first<{ id: string; name: string; content: string }>();
-
         if (!row) {
           return { file_id: args.file_id, filename: "NOT_FOUND", total_lines: 0, content: "" };
         }
 
         const fullContent = row.content ?? "";
-        const hash = await sha256Hex(fullContent);
-        contentHashMap.set(args.file_id, hash);
+        contentHashMap.set(args.file_id, await sha256Hex(fullContent));
 
         const lines = fullContent.split("\n");
-        const totalLines = lines.length;
+        const total = lines.length;
+        const MAX_SPAN = 200;
 
         let start: number;
         let end: number;
-
         if (args.line_start === undefined) {
           start = 0;
-          end = Math.min(50, totalLines);
+          end = Math.min(50, total);
         } else {
           start = Math.max(0, args.line_start - 1);
-          end = args.line_end !== undefined ? Math.min(args.line_end, totalLines) : Math.min(start + 200, totalLines);
+          end = args.line_end !== undefined ? Math.min(args.line_end, total) : Math.min(start + MAX_SPAN, total);
         }
-
-        const maxSpan = 200;
-        if (end - start > maxSpan) {
-          end = start + maxSpan;
-        }
-
-        const numbered = lines.slice(start, end).map((line, i) => `${start + i + 1}: ${line}`);
+        if (end - start > MAX_SPAN) end = start + MAX_SPAN;
 
         return {
           file_id: row.id,
           filename: row.name,
-          total_lines: totalLines,
-          content: numbered.join("\n"),
+          total_lines: total,
+          content: numberLines(lines.slice(start, end).join("\n"), start + 1),
         };
       },
     }),
 
     tool({
       name: "edit_file",
-      description: "Rename a file or change its category/tag. Set new_tag to null to archive (remove from category). Requires a prior read_file call to establish content hash.",
+      description:
+        "Rename a file or change its category. Requires a prior read_file call.\n" +
+        'new_tag: category name/ID to move to. "Archived" = archive. Omit = no change.',
       inputSchema: z.object({
-        file_id: z.string().describe("The file ID to edit"),
-        new_filename: z.string().optional().describe("New filename"),
-        new_tag: z.string().nullable().optional().describe("New category/tag name or ID. Set to null to archive (remove from any category)."),
-      }),
-      outputSchema: z.object({
-        success: z.boolean(),
         file_id: z.string(),
-        error: z.string().optional(),
+        new_filename: z.string().optional(),
+        new_tag: z.string().optional(),
       }),
+      outputSchema: z.object({ success: z.boolean(), file_id: z.string(), error: z.string().optional() }),
       execute: async (args) => {
-        const existingHash = contentHashMap.get(args.file_id);
-        if (!existingHash) {
-          return { success: false, file_id: args.file_id, error: "File not read yet. Call read_file first." };
-        }
-
-        const row = await env.DB.prepare("SELECT content FROM notes WHERE id = ?")
-          .bind(args.file_id)
-          .first<{ content: string }>();
-
-        if (!row) {
-          return { success: false, file_id: args.file_id, error: "File not found." };
-        }
-
-        const currentHash = await sha256Hex(row.content ?? "");
-        if (currentHash !== existingHash) {
-          return { success: false, file_id: args.file_id, error: "Content changed since last read. Re-read the file." };
-        }
+        const check = await verifyHash(db, args.file_id, contentHashMap);
+        if (!check.ok) return { success: false, file_id: args.file_id, error: check.error };
 
         if (args.new_filename) {
-          await env.DB.prepare("UPDATE notes SET name = ? WHERE id = ?")
-            .bind(args.new_filename, args.file_id)
-            .run();
+          await db.prepare("UPDATE notes SET name = ? WHERE id = ?").bind(args.new_filename, args.file_id).run();
         }
 
-        if (args.new_tag !== undefined) {
-          if (args.new_tag === null) {
-            await env.DB.prepare("UPDATE notes SET category_id = NULL WHERE id = ?")
-              .bind(args.file_id)
-              .run();
+        if (args.new_tag) {
+          if (args.new_tag === "Archived") {
+            await db.prepare("UPDATE notes SET category_id = NULL WHERE id = ?").bind(args.file_id).run();
           } else {
-            const category = await env.DB.prepare(
-              "SELECT id FROM categories WHERE name = ? AND notebook_id = ?",
-            )
-              .bind(args.new_tag, notebookId)
+            let category = await db
+              .prepare("SELECT id FROM categories WHERE (name = ? OR id = ?) AND notebook_id = ?")
+              .bind(args.new_tag, args.new_tag, notebookId)
               .first<{ id: string }>();
 
-            const categoryId = category?.id ?? args.new_tag;
-            await env.DB.prepare("UPDATE notes SET category_id = ? WHERE id = ?")
-              .bind(categoryId, args.file_id)
-              .run();
+            if (!category) {
+              const newCatId = crypto.randomUUID();
+              const maxPos = await db
+                .prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM categories WHERE notebook_id = ?")
+                .bind(notebookId)
+                .first<{ next_pos: number }>();
+              await db
+                .prepare("INSERT INTO categories (id, notebook_id, name, position, is_archive) VALUES (?, ?, ?, ?, 0)")
+                .bind(newCatId, notebookId, args.new_tag, maxPos?.next_pos ?? 0)
+                .run();
+              category = { id: newCatId };
+            }
+
+            await db.prepare("UPDATE notes SET category_id = ? WHERE id = ?").bind(category.id, args.file_id).run();
+          }
+        }
+
+        if (args.new_filename && env.AI_SEARCH) {
+          const meta = await db
+            .prepare("SELECT name, content, notebook_id FROM notes WHERE id = ?")
+            .bind(args.file_id)
+            .first<{ name: string; content: string; notebook_id: string }>();
+          if (meta) {
+            upsertNoteToAiSearch(env.AI_SEARCH, {
+              notebookId: meta.notebook_id,
+              noteId: args.file_id,
+              filename: meta.name,
+              content: meta.content ?? "",
+            }).catch(() => {});
           }
         }
 
@@ -232,64 +393,66 @@ export function createAgentTools(params: CreateAgentToolsParams) {
 
     tool({
       name: "edit_content",
-      description:
-        "Apply line-based patches to a file's content. Each patch replaces lines from start_line to end_line (inclusive, 1-based) with new content. Requires a prior read_file call.",
+      description: [
+        "Apply a unified diff patch to file content. Requires a prior read_file call.",
+        "The `diff` field must be a valid unified diff string (the format produced by `diff -u` / `git diff`).",
+        "Omit the `--- a/` and `+++ b/` file headers — only hunks are needed.",
+        "Example diff value:",
+        "@@ -2,3 +2,4 @@",
+        " existing context line",
+        "-old line to remove",
+        "+new replacement line",
+        "+another new line",
+        " more context",
+      ].join("\n"),
       inputSchema: z.object({
-        file_id: z.string().describe("The file ID to patch"),
-        patches: z.array(
-          z.object({
-            start_line: z.number().describe("First line to replace (1-based, inclusive)"),
-            end_line: z.number().describe("Last line to replace (1-based, inclusive)"),
-            content: z.string().describe("Replacement content (may contain newlines)"),
-          }),
-        ),
-      }),
-      outputSchema: z.object({
-        success: z.boolean(),
         file_id: z.string(),
-        error: z.string().optional(),
+        diff: z.string().describe("Unified diff patch (hunks only, no file headers)"),
       }),
+      outputSchema: z.object({ success: z.boolean(), file_id: z.string(), error: z.string().optional() }),
       execute: async (args) => {
-        const existingHash = contentHashMap.get(args.file_id);
-        if (!existingHash) {
-          return { success: false, file_id: args.file_id, error: "File not read yet. Call read_file first." };
+        const check = await verifyHash(db, args.file_id, contentHashMap);
+        if (!check.ok) return { success: false, file_id: args.file_id, error: check.error };
+
+        const patchText = [
+          "--- a/file",
+          "+++ b/file",
+          args.diff,
+        ].join("\n");
+
+        const result = applyPatch(check.content, patchText, { fuzzFactor: 2 });
+        if (result === false) {
+          return {
+            success: false,
+            file_id: args.file_id,
+            error: "Diff patch failed to apply. Context lines may not match current content. Re-read the file with read_file and try again.",
+          };
         }
 
-        const row = await env.DB.prepare("SELECT content FROM notes WHERE id = ?")
-          .bind(args.file_id)
-          .first<{ content: string }>();
-
-        if (!row) {
-          return { success: false, file_id: args.file_id, error: "File not found." };
-        }
-
-        const currentHash = await sha256Hex(row.content ?? "");
-        if (currentHash !== existingHash) {
-          return { success: false, file_id: args.file_id, error: "Content changed since last read. Re-read the file." };
-        }
-
-        const lines = (row.content ?? "").split("\n");
-
-        const sortedPatches = [...args.patches].sort((a, b) => b.start_line - a.start_line);
-        for (const patch of sortedPatches) {
-          const start = Math.max(0, patch.start_line - 1);
-          const end = Math.min(lines.length, patch.end_line);
-          const replacement = patch.content.split("\n");
-          lines.splice(start, end - start, ...replacement);
-        }
-
-        const newContent = lines.join("\n");
+        const newContent = result;
         const wordCount = newContent.split(/\s+/).filter(Boolean).length;
         const now = new Date().toISOString();
-        const newHash = await sha256Hex(newContent);
+        contentHashMap.set(args.file_id, await sha256Hex(newContent));
 
-        await env.DB.prepare(
-          "UPDATE notes SET content = ?, word_count = ?, updated_at = ? WHERE id = ?",
-        )
+        await db
+          .prepare("UPDATE notes SET content = ?, word_count = ?, updated_at = ? WHERE id = ?")
           .bind(newContent, wordCount, now, args.file_id)
           .run();
 
-        contentHashMap.set(args.file_id, newHash);
+        if (env.AI_SEARCH) {
+          const meta = await db
+            .prepare("SELECT name, notebook_id FROM notes WHERE id = ?")
+            .bind(args.file_id)
+            .first<{ name: string; notebook_id: string }>();
+          if (meta) {
+            upsertNoteToAiSearch(env.AI_SEARCH, {
+              notebookId: meta.notebook_id,
+              noteId: args.file_id,
+              filename: meta.name,
+              content: newContent,
+            }).catch(() => {});
+          }
+        }
 
         return { success: true, file_id: args.file_id };
       },
@@ -297,92 +460,53 @@ export function createAgentTools(params: CreateAgentToolsParams) {
 
     tool({
       name: "web_search",
-      description: "Search the web for information. Currently returns empty results (not yet implemented).",
-      inputSchema: z.object({
-        query: z.string().describe("Search query"),
-      }),
-      outputSchema: z.object({
-        results: z.array(
-          z.object({
-            title: z.string(),
-            url: z.string(),
-            snippet: z.string(),
-          }),
-        ),
-      }),
-      execute: async () => {
-        return { results: [] };
-      },
+      description: "Search the web. (Not yet implemented.)",
+      inputSchema: z.object({ query: z.string() }),
+      outputSchema: z.object({ results: z.array(z.object({ title: z.string(), url: z.string(), snippet: z.string() })) }),
+      execute: async () => ({ results: [] }),
     }),
 
     tool({
       name: "web_page_read",
-      description: "Read and extract content from a web page URL. Currently a stub.",
-      inputSchema: z.object({
-        url: z.string().describe("URL to read"),
-      }),
-      outputSchema: z.object({
-        title: z.string(),
-        content: z.string(),
-      }),
-      execute: async () => {
-        return { title: "Not implemented", content: "Browser rendering not yet wired." };
-      },
+      description: "Read a web page as markdown. (Not yet implemented.)",
+      inputSchema: z.object({ url: z.string() }),
+      outputSchema: z.object({ title: z.string(), content: z.string() }),
+      execute: async () => ({ title: "Not implemented", content: "Browser rendering not yet wired." }),
     }),
 
     tool({
       name: "reply",
-      description: "Send a progress message to the user without expecting a response. Use this to communicate intermediate steps or status updates.",
-      inputSchema: z.object({
-        message: z.string().describe("Progress message to display to the user"),
-      }),
-      outputSchema: z.object({
-        success: z.boolean(),
-      }),
-      execute: async () => {
-        return { success: true };
-      },
+      description: "Send a progress message to the user without pausing the loop.",
+      inputSchema: z.object({ message: z.string() }),
+      outputSchema: z.object({ success: z.boolean() }),
+      execute: async () => ({ success: true }),
     }),
 
     tool({
       name: "ask",
-      description:
-        "Ask the user one or more questions and wait for their response. The agent loop will pause until the user answers.",
+      description: "Ask the user questions and wait for answers. Pauses the agent loop.",
       inputSchema: z.object({
         questions: z.array(
           z.object({
-            id: z.string().describe("Unique question identifier"),
-            question: z.string().describe("The question text"),
-            options: z.array(
-              z.object({
-                label: z.string().describe("Option label"),
-                description: z.string().optional().describe("Option description"),
-              }),
-            ),
-            multi: z.boolean().optional().describe("Whether multiple selections are allowed"),
+            id: z.string(),
+            question: z.string(),
+            options: z.array(z.object({ label: z.string(), description: z.string().optional() })),
+            multi: z.boolean().optional(),
           }),
         ),
       }),
-      outputSchema: z.object({
-        answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])),
-      }),
-      execute: async () => {
-        return new Promise<{ answers: Record<string, string | string[]> }>((resolve) => {
+      outputSchema: z.object({ answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])) }),
+      execute: async () =>
+        new Promise<{ answers: Record<string, string | string[]> }>((resolve) => {
           askResolverRef.current = { resolve: resolve as (v: unknown) => void };
-        });
-      },
+        }),
     }),
 
     tool({
       name: "finish",
-      description:
-        "Signal that the task is complete and the agent loop should terminate. Include a final summary message.",
-      inputSchema: z.object({
-        message: z.string().describe("Final completion message"),
-      }),
-      outputSchema: z.object({
-        success: z.boolean(),
-      }),
+      description: "Signal task complete. Terminates the agent loop.",
+      inputSchema: z.object({ message: z.string() }),
+      outputSchema: z.object({ success: z.boolean() }),
       execute: async () => {
         finishFlagRef.current = true;
         return { success: true };
@@ -390,3 +514,5 @@ export function createAgentTools(params: CreateAgentToolsParams) {
     }),
   ];
 }
+
+export { numberChunkLines };

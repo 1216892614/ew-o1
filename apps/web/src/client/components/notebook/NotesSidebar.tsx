@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { useAtom, useSetAtom } from "jotai";
+import { useAtom, useSetAtom, useAtomValue } from "jotai";
 import {
   Plus,
   CheckSquare,
@@ -12,11 +12,12 @@ import {
   UploadSimple,
   FolderSimplePlus,
   PencilSimple,
+  ClockCounterClockwise,
 } from "@phosphor-icons/react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { trpc } from "@/client/lib/trpc";
 import toast from "react-hot-toast";
-import { selectedNoteIdsAtom, sortModeAtom, openedNoteIdAtom } from "./state";
+import { selectedNoteIdsAtom, sortModeAtom, openedNoteIdAtom, openedNoteIdsAtom, activeNoteIdAtom } from "./state";
 
 interface Note {
   id: string;
@@ -45,6 +46,7 @@ interface NotesSidebarProps {
   notebookId: string;
   draggedNoteIds: string[];
   isDragging: boolean;
+  onOpenTimeMachine?: () => void;
 }
 
 function relativeTime(date: Date): string {
@@ -266,10 +268,13 @@ function DroppableCategorySection({
 }
 
 
-export function NotesSidebar({ notebookId, draggedNoteIds, isDragging }: NotesSidebarProps) {
+export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTimeMachine }: NotesSidebarProps) {
   const [selectedIds, setSelectedIds] = useAtom(selectedNoteIdsAtom);
   const [sortMode, setSortMode] = useAtom(sortModeAtom);
   const setOpenedNoteId = useSetAtom(openedNoteIdAtom);
+  const openedNoteIds = useAtomValue(openedNoteIdsAtom);
+  const activeNoteId = useAtomValue(activeNoteIdAtom);
+  const openedSet = useMemo(() => new Set(openedNoteIds), [openedNoteIds]);
 
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
     new Set(["__archived__"]),
@@ -597,8 +602,16 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging }: NotesSi
           </>
         )}
 
-        {/* Sort */}
-        <div className="ml-auto">
+
+        {/* Sort + Time Machine */}
+        <div className="ml-auto flex items-center gap-0.5">
+          <button
+            className="btn btn-ghost btn-xs"
+            onClick={onOpenTimeMachine}
+            title="时光机"
+          >
+            <ClockCounterClockwise size={14} />
+          </button>
           <div className="dropdown dropdown-end">
             <label tabIndex={0} className="btn btn-ghost btn-xs">
               <ArrowsDownUp size={14} />
@@ -703,7 +716,7 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging }: NotesSi
                     key={note.id}
                     note={note}
                     isSelected={selectedIds.has(note.id)}
-                    isOpened={false}
+                    isOpened={openedSet.has(note.id)}
                     isBeingDragged={draggedSet.has(note.id)}
                     onToggleSelect={handleToggleSelect}
                     onToggleActive={handleToggleActive}

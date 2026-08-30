@@ -11,6 +11,7 @@ import { EditorPanel } from "@/client/components/notebook/EditorPanel";
 import { ModelSelector, type ModelConfig, getDefaultModelConfig } from "@/client/components/notebook/ModelSelector";
 import { SessionSelector } from "@/client/components/notebook/SessionSelector";
 import { NotebookMetaModal } from "@/client/components/notebook/NotebookMetaModal";
+import { TimeMachineModal } from "@/client/components/notebook/TimeMachineModal";
 import { useAtom, useSetAtom } from "jotai";
 import { openedNoteIdAtom, selectedNoteIdsAtom } from "@/client/components/notebook/state";
 import { z } from "zod";
@@ -46,9 +47,11 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
   const [showMetaModal, setShowMetaModal] = useState(false);
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [showSessionSelector, setShowSessionSelector] = useState(false);
+  const [showTimeMachine, setShowTimeMachine] = useState(false);
   const [modelConfig, setModelConfig] = useState<ModelConfig>(getDefaultModelConfig());
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [draggedNoteIds, setDraggedNoteIds] = useState<string[]>([]);
+  const [droppedNoteIdsForChat, setDroppedNoteIdsForChat] = useState<string[]>([]);
   const [pendingCategoryNoteIds, setPendingCategoryNoteIds] = useState<string[] | null>(null);
   const [leafId, setLeafIdState] = useState<string | null>(leafFromUrl ?? null);
 
@@ -97,7 +100,7 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
         setOpenedNoteId(draggedNoteIds[0]);
       }
     } else if (dropId === "chat-drop-zone") {
-      // Handled by AgentChat's onDrop
+      setDroppedNoteIdsForChat([...draggedNoteIds]);
     } else if (dropId === "category-search-drop") {
       // Open category search modal
       setPendingCategoryNoteIds([...draggedNoteIds]);
@@ -195,7 +198,7 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
       <div className="flex flex-1 overflow-hidden">
           {/* Left: Notes Sidebar */}
           <div className="w-80 border-r border-base-300 flex flex-col overflow-hidden">
-            <NotesSidebar notebookId={notebookId} draggedNoteIds={draggedNoteIds} isDragging={draggedNoteIds.length > 0} />
+            <NotesSidebar notebookId={notebookId} draggedNoteIds={draggedNoteIds} isDragging={draggedNoteIds.length > 0} onOpenTimeMachine={() => setShowTimeMachine(true)} />
           </div>
 
           {/* Center: Agent Chat */}
@@ -213,6 +216,8 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
               onOpenModelSelector={() => setShowModelSelector(true)}
               onOpenSessionSelector={() => setShowSessionSelector(true)}
               draggedNoteIds={draggedNoteIds}
+              droppedNoteIdsForChat={droppedNoteIdsForChat}
+              clearDroppedNoteIds={() => setDroppedNoteIdsForChat([])}
               notesList={notesList ?? []}
             />
           </div>
@@ -267,6 +272,12 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
             setShowSessionSelector(false);
           }}
           onClose={() => setShowSessionSelector(false)}
+        />
+      )}
+      {showTimeMachine && (
+        <TimeMachineModal
+          notebookId={notebookId}
+          onClose={() => setShowTimeMachine(false)}
         />
       )}
     </DndContext>
