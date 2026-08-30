@@ -156,6 +156,8 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
           <div className="flex-1 flex flex-col overflow-hidden border-r border-base-300">
             <AgentChat
               notebookId={notebookId}
+              notebookName={notebook.name}
+              notebookDescription={notebook.description ?? ""}
               modelConfig={modelConfig}
               setModelConfig={setModelConfig}
               currentSessionId={currentSessionId}

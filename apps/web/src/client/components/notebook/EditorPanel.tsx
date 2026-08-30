@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtom } from "jotai";
 import { useDroppable } from "@dnd-kit/core";
+import { NotePencil } from "@phosphor-icons/react";
 import Editor from "@monaco-editor/react";
 import { trpc } from "@/client/lib/trpc";
 import { openedNoteIdAtom } from "./state";
@@ -99,20 +100,27 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
 
       {/* Editor area */}
       <div className="flex-1">
-        <Editor
-          height="100%"
-          language="markdown"
-          theme={theme}
-          value={openedNote?.content ?? ""}
-          onChange={handleChange}
-          options={{
-            minimap: { enabled: false },
-            lineNumbers: "on",
-            wordWrap: "on",
-            fontSize: 14,
-            padding: { top: 16 },
-          }}
-        />
+        {openedNote ? (
+          <Editor
+            height="100%"
+            language="markdown"
+            theme={theme}
+            value={openedNote.content ?? ""}
+            onChange={handleChange}
+            options={{
+              minimap: { enabled: false },
+              lineNumbers: "on",
+              wordWrap: "on",
+              fontSize: 14,
+              padding: { top: 16 },
+            }}
+          />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-base-content/30">
+            <NotePencil size={48} weight="thin" />
+            <span className="text-sm">选择一个笔记开始编辑</span>
+          </div>
+        )}
       </div>
     </div>
   );

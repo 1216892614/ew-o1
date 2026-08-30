@@ -65,6 +65,8 @@ type NoteItem = {
 
 interface AgentChatProps {
   notebookId: string;
+  notebookName: string;
+  notebookDescription: string;
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig) => void;
   currentSessionId: string | null;
@@ -94,6 +96,8 @@ interface StreamingAssistant {
 
 export function AgentChat({
   notebookId,
+  notebookName,
+  notebookDescription,
   modelConfig,
   setModelConfig,
   currentSessionId,
@@ -305,6 +309,11 @@ export function AgentChat({
     });
 
     try {
+      const systemPrompt = [
+        `You are an AI assistant for the notebook "${notebookName}".`,
+        notebookDescription ? `Notebook description: ${notebookDescription}` : "",
+      ].filter(Boolean).join(" ");
+
       const requestBody: ChatRequestBody = {
         sessionId,
         notebookId,
@@ -314,6 +323,7 @@ export function AgentChat({
         modelName: modelConfig.model.name,
         modelProvider: modelConfig.model.provider,
         modelParams: modelConfig.params,
+        systemPrompt,
         activeNotes,
       };
 
