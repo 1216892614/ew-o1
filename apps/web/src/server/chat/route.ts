@@ -42,4 +42,22 @@ chatRoute.post("/api/chat/answer", async (c) => {
   return c.json({ success: true });
 });
 
+chatRoute.post("/api/chat/compress", async (c) => {
+  const body = (await c.req.json()) as {
+    sessionId: string;
+    notebookId: string;
+    mode: "native" | "soft";
+    model: string;
+    leafId: string | null;
+  };
+  if (!body.sessionId || !body.notebookId) {
+    return c.json({ error: "Missing sessionId or notebookId" }, 400);
+  }
+  const sessionKey = `${body.notebookId}/${body.sessionId}`;
+  const stub = c.env.CHAT_DO.getByName(sessionKey);
+  stub.setSessionKey(sessionKey);
+  const result = await stub.compress(body.mode, body.model, body.leafId);
+  return c.json(result);
+});
+
 export { chatRoute };

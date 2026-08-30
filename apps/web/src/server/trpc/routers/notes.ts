@@ -72,6 +72,21 @@ export const notesRouter = router({
       return { id };
     }),
 
+  renameCategory: publicProcedure
+    .input(
+      z.object({
+        id: z.string(),
+        name: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      await ctx.db
+        .update(categories)
+        .set({ name: input.name })
+        .where(eq(categories.id, input.id));
+      return { id: input.id };
+    }),
+
   listNotes: publicProcedure
     .input(
       z.object({

@@ -327,6 +327,116 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /**
+   * Compress conversation history.
+   * "native" → check if provider supports prompt caching (most don't). Returns { supported: false } to fall back.
+   * "soft"   → summarize entire conversation into a single system-summary + user-ask pair, delete old nodes.
+   */
+  async compress(mode: "native" | "soft", model: string, leafId: string | null): Promise<{ success: boolean; supported?: boolean; summary?: string }> {
+    if (mode === "native") {
+      return { success: false, supported: false };
+    }
+
+    const allRows = this.ctx.storage.sql
+      .exec<NodeRow>(
+        `SELECT id, role, parent_id as parentId, content, timeline, model, model_name as modelName,
+                model_provider as modelProvider, model_params as modelParams, status, created_at as createdAt
+         FROM nodes ORDER BY created_at ASC`,
+      )
+      .toArray();
+    const allNodes = allRows.map(rowToNode);
+    const path = resolvePathToLeaf(allNodes, leafId);
+
+    if (path.length < 4) {
+      return { success: false, summary: "对话太短，无需压缩" };
+    }
+
+    const conversationText = path
+      .map((n) => `[${n.role}]: ${n.content.slice(0, 2000)}`)
+      .join("\n\n");
+
+    const isDeepseek = model.startsWith("deepseek");
+    const apiKey = isDeepseek ? this.env.DEEPSEEK_AI_KEY : this.env.BIGBIGDOG_AI_KEY;
+    const baseURL = isDeepseek
+      ? `https://gateway.ai.cloudflare.com/v1/3244c8f91cd34317ce18652158e5853a/${this.env.CF_AI_GATEWAY_ID}/deepseek`
+      : "https://www.dogapi.cc/v1";
+
+    const summaryPrompt = `请将以下对话历史压缩为一段简洁的摘要，保留关键信息、决策和结论。摘要应该能让 AI 继续对话而不丢失重要上下文。用中文回复。\n\n---\n${conversationText}\n---\n\n请输出压缩后的对话摘要:`;
+
+    let summaryContent = "";
+    try {
+      const resp = await fetch(`${baseURL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: summaryPrompt }],
+          max_tokens: 4096,
+          stream: false,
+        }),
+      });
+      if (!resp.ok) {
+        return { success: false, summary: `压缩失败：API 返回 ${resp.status}` };
+      }
+      const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      summaryContent = data.choices?.[0]?.message?.content ?? "";
+    } catch {
+      return { success: false, summary: "压缩失败：无法生成摘要" };
+    }
+
+    if (!summaryContent.trim()) {
+      return { success: false, summary: "压缩失败：摘要为空" };
+    }
+
+    const oldNodeIds = path.map((n) => n.id);
+    for (const id of oldNodeIds) {
+      this.ctx.storage.sql.exec("DELETE FROM nodes WHERE id = ?", id);
+    }
+
+    const now = Date.now();
+    const summaryUserId = nanoid();
+    const summaryAssistantId = nanoid();
+
+    this.ctx.storage.sql.exec(
+      `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      summaryUserId,
+      "user",
+      null,
+      "[对话已压缩] 请基于以下摘要继续对话",
+      null,
+      model,
+      "system",
+      "compress",
+      null,
+      null,
+      now,
+    );
+
+    this.ctx.storage.sql.exec(
+      `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      summaryAssistantId,
+      "assistant",
+      summaryUserId,
+      summaryContent,
+      JSON.stringify([{ kind: "text", content: summaryContent, streaming: false }]),
+      model,
+      "system",
+      "compress",
+      null,
+      "done",
+      now + 1,
+    );
+
+    await this.flushToR2();
+
+    return { success: true, summary: summaryContent.slice(0, 200) };
+  }
+
   private createAdapter(model: string) {
     const isDeepseek = model.startsWith("deepseek");
     const apiKey = isDeepseek ? this.env.DEEPSEEK_AI_KEY : this.env.BIGBIGDOG_AI_KEY;

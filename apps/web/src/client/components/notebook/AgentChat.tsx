@@ -23,9 +23,13 @@ import {
   Lightning,
   Files,
   MagnifyingGlass,
+  Paperclip,
+  UploadSimple,
+  ArrowsInSimple,
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { trpc } from "@/client/lib/trpc";
+import toast from "react-hot-toast";
 import { type ModelConfig, MODELS } from "./ModelSelector";
 import type {
   ChatNode,
@@ -113,6 +117,11 @@ export function AgentChat({
   const [streamingAssistant, setStreamingAssistantState] = useState<StreamingAssistant | null>(null);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [attachedNoteIds, setAttachedNoteIds] = useState<Set<string>>(new Set());
+  const [showAttachPopover, setShowAttachPopover] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [isChatUploading, setIsChatUploading] = useState(false);
+  const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const prevDraggedRef = useRef<string[]>([]);
@@ -212,8 +221,13 @@ export function AgentChat({
 
   /* Note drop */
   const handleNoteDrop = useCallback(
-    (_noteIds: string[]) => {
-      // System messages are not part of the tree; just show a toast or similar
+    (droppedIds: string[]) => {
+      setAttachedNoteIds((prev) => {
+        const next = new Set(prev);
+        for (const id of droppedIds) next.add(id);
+        return next;
+      });
+      setTimeout(() => textareaRef.current?.focus(), 0);
     },
     [],
   );
@@ -230,6 +244,91 @@ export function AgentChat({
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activePath, streamingAssistant]);
 
+  /* Upload files from chat input → auto-attach */
+  const handleChatUpload = useCallback(
+    async (fileList: FileList) => {
+      if (fileList.length === 0) return;
+      setIsChatUploading(true);
+      try {
+        const formData = new FormData();
+        formData.append("notebookId", notebookId);
+        for (const file of fileList) {
+          formData.append("files", file);
+        }
+        const response = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+        if (!response.ok) {
+          const errorBody = await response.json().catch(() => null);
+          throw new Error(
+            (errorBody as { error?: string } | null)?.error ?? "上传失败",
+          );
+        }
+        const result = (await response.json()) as {
+          uploaded: number;
+          notes: Array<{ id: string; name: string }>;
+        };
+        setAttachedNoteIds((prev) => {
+          const next = new Set(prev);
+          for (const note of result.notes) next.add(note.id);
+          return next;
+        });
+        toast.success(`已上传 ${result.uploaded} 个文件并附加`);
+        utils.notes.listNotes.invalidate();
+        utils.notes.listCategories.invalidate();
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "上传失败");
+      } finally {
+        setIsChatUploading(false);
+        if (chatFileInputRef.current) chatFileInputRef.current.value = "";
+      }
+    },
+    [notebookId, utils],
+  );
+
+  /* Compress conversation */
+  const handleCompress = useCallback(
+    async (mode: "native" | "soft") => {
+      if (!currentSessionId || isCompressing) return;
+      setIsCompressing(true);
+      try {
+        const response = await fetch("/api/chat/compress", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: currentSessionId,
+            notebookId,
+            mode,
+            model: modelConfig.model.id,
+            leafId,
+          }),
+        });
+        const result = (await response.json()) as {
+          success: boolean;
+          supported?: boolean;
+          summary?: string;
+        };
+        if (mode === "native" && result.supported === false) {
+          toast("当前模型不支持原生压缩，已回退到软压缩", { icon: "⚠️" });
+          await handleCompress("soft");
+          return;
+        }
+        if (!result.success) {
+          toast.error(result.summary ?? "压缩失败");
+          return;
+        }
+        toast.success("对话已压缩");
+        await loadHistory(notebookId, currentSessionId);
+      } catch {
+        toast.error("压缩失败");
+      } finally {
+        setIsCompressing(false);
+      }
+    },
+    [currentSessionId, notebookId, modelConfig.model.id, leafId, isCompressing],
+  );
+
   /* ── Navigate to a different leaf ─────────────────────── */
   function navigateToLeaf(nodeId: string) {
     /* Find the deepest descendant of this node to use as leaf */
@@ -245,8 +344,15 @@ export function AgentChat({
 
   /* ── Send message ─────────────────────────────────────── */
   async function sendMessage(overrideText?: string, parentIdOverride?: string | null) {
-    const text = overrideText ?? input.trim();
-    if (!text || isStreaming) return;
+    const rawText = overrideText ?? input.trim();
+    if (!rawText || isStreaming) return;
+
+    let text = rawText;
+    const currentAttached = [...attachedNoteIds];
+    if (currentAttached.length > 0 && !overrideText) {
+      const noteRefs = currentAttached.map((id) => `[${id}]`).join(", ");
+      text = `用户引用了标记: ${noteRefs}\n---\n${rawText}`;
+    }
 
     let sessionId = currentSessionId;
 
@@ -271,7 +377,11 @@ export function AgentChat({
         ? activePath[activePath.length - 1].id
         : null;
 
-    if (!overrideText) setInput("");
+    if (!overrideText) {
+      setInput("");
+      setAttachedNoteIds(new Set());
+      setShowAttachPopover(false);
+    }
     setIsStreaming(true);
 
     const controller = new AbortController();
@@ -767,20 +877,127 @@ export function AgentChat({
       {/* Drop overlay */}
       {isOver && (
         <div className="absolute inset-0 bg-primary/10 border-2 border-dashed border-primary rounded-lg flex items-center justify-center pointer-events-none z-10">
-          <span className="text-primary font-medium text-sm">Drop notes to add context</span>
+          <span className="text-primary font-medium text-sm">拖放笔记以引用</span>
         </div>
       )}
 
       {/* Input Area */}
-      <div className="border-t border-base-300 p-3 shrink-0">
-        <div className="relative">
+      <div className="border-t border-base-300 shrink-0">
+        {/* Toolbar row */}
+        <div className="flex items-center gap-1 px-3 pt-2 pb-1">
+          {/* Attach notes */}
+          <div className="relative">
+            <button
+              type="button"
+              className={`btn btn-ghost btn-xs gap-1 ${attachedNoteIds.size > 0 ? "text-primary" : "text-base-content/40"}`}
+              onClick={() => setShowAttachPopover((v) => !v)}
+              title="附加笔记"
+            >
+              <Paperclip size={14} />
+              {attachedNoteIds.size > 0 && (
+                <span className="badge badge-xs badge-primary">{attachedNoteIds.size}</span>
+              )}
+            </button>
+            {showAttachPopover && (
+              <div className="absolute bottom-full left-0 mb-1 w-64 bg-base-200 rounded-box shadow-lg border border-base-300 z-20 p-2 max-h-48 overflow-y-auto">
+                {attachedNoteIds.size === 0 ? (
+                  <div className="text-xs text-base-content/40 text-center py-2">
+                    拖拽笔记到聊天区域以附加
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1">
+                    {[...attachedNoteIds].map((noteId) => {
+                      const note = notesList.find((n) => n.id === noteId);
+                      return (
+                        <div
+                          key={noteId}
+                          className="flex items-center gap-2 text-xs px-1.5 py-1 rounded hover:bg-base-300"
+                        >
+                          <Files size={12} className="shrink-0" />
+                          <span className="truncate flex-1">{note?.name ?? noteId}</span>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-xs btn-circle"
+                            onClick={() =>
+                              setAttachedNoteIds((prev) => {
+                                const next = new Set(prev);
+                                next.delete(noteId);
+                                return next;
+                              })
+                            }
+                          >
+                            <X size={10} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Upload from chat */}
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs text-base-content/40"
+            onClick={() => chatFileInputRef.current?.click()}
+            disabled={isChatUploading}
+            title="上传文件并附加"
+          >
+            {isChatUploading ? (
+              <span className="loading loading-spinner loading-xs" />
+            ) : (
+              <UploadSimple size={14} />
+            )}
+          </button>
+          <input
+            ref={chatFileInputRef}
+            type="file"
+            className="hidden"
+            multiple
+            accept="text/*,.md,.txt,.csv,.json,.xml,.html,.htm,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.sh,.bash,.zsh,.py,.js,.ts,.jsx,.tsx,.css,.scss,.less,.sql,.r,.rs,.go,.java,.c,.cpp,.h,.hpp,.rb,.php,.swift,.kt,.scala,.lua,.pl,.tex,.bib,.org,.rst,.adoc,.nix"
+            onChange={(e) => {
+              if (e.target.files && e.target.files.length > 0) {
+                handleChatUpload(e.target.files);
+              }
+            }}
+          />
+
+          {/* Compress conversation */}
+          <div className="dropdown dropdown-top">
+            <button
+              type="button"
+              className="btn btn-ghost btn-xs text-base-content/40"
+              disabled={!currentSessionId || isCompressing}
+              title="压缩对话"
+            >
+              {isCompressing ? (
+                <span className="loading loading-spinner loading-xs" />
+              ) : (
+                <ArrowsInSimple size={14} />
+              )}
+            </button>
+            <ul className="dropdown-content menu menu-xs bg-base-200 rounded-box shadow-lg z-20 w-32 mb-1">
+              <li>
+                <button onClick={() => handleCompress("native")}>原生压缩</button>
+              </li>
+              <li>
+                <button onClick={() => handleCompress("soft")}>软压缩</button>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        {/* Textarea */}
+        <div className="relative px-3 pb-3">
           <textarea
             autoFocus
             ref={textareaRef}
             className="textarea textarea-bordered w-full pr-12 resize-none"
             rows={1}
             style={{ maxHeight: "6rem" }}
-            placeholder="Type a message..."
+            placeholder="输入消息..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -791,15 +1008,15 @@ export function AgentChat({
             }}
           />
           {isStreaming ? (
-            <button type="button" className="btn btn-error btn-sm absolute bottom-2 right-2" onClick={stopStreaming}>
+            <button type="button" className="btn btn-error btn-sm absolute bottom-5 right-5" onClick={stopStreaming}>
               <Stop size={16} weight="bold" />
             </button>
           ) : (
             <button
               type="button"
-              className="btn btn-primary btn-sm absolute bottom-2 right-2"
+              className="btn btn-primary btn-sm absolute bottom-5 right-5"
               onClick={() => sendMessage()}
-              disabled={!input.trim()}
+              disabled={!input.trim() && attachedNoteIds.size === 0}
             >
               <PaperPlaneRight size={16} weight="bold" />
             </button>
