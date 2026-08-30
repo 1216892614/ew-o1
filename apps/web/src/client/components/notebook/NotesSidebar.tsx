@@ -274,7 +274,7 @@ export function NotesSidebar({ notebookId, draggedNoteIds }: NotesSidebarProps) 
     (note: Note) => {
       updateNote.mutate(
         { id: note.id, active: !(note.active ?? true) },
-        { onSuccess: () => utils.notes.listNotes.invalidate({ notebookId }) },
+        { onSuccess: () => utils.notes.listNotes.invalidate() },
       );
     },
     [updateNote, utils, notebookId],
@@ -294,7 +294,7 @@ export function NotesSidebar({ notebookId, draggedNoteIds }: NotesSidebarProps) 
       { ids, categoryId: null },
       {
         onSuccess: () => {
-          utils.notes.listNotes.invalidate({ notebookId });
+          utils.notes.listNotes.invalidate();
           setSelectedIds(new Set<string>());
         },
       },
@@ -309,7 +309,7 @@ export function NotesSidebar({ notebookId, draggedNoteIds }: NotesSidebarProps) 
       { ids, active: !allActive },
       {
         onSuccess: () => {
-          utils.notes.listNotes.invalidate({ notebookId });
+          utils.notes.listNotes.invalidate();
           setSelectedIds(new Set<string>());
         },
       },
@@ -329,7 +329,7 @@ export function NotesSidebar({ notebookId, draggedNoteIds }: NotesSidebarProps) 
         { notebookId, name: value },
         {
           onSuccess: () => {
-            utils.notes.listCategories.invalidate({ notebookId });
+            utils.notes.listCategories.invalidate();
             setNewItemName("");
             setAddingMode("none");
           },
@@ -340,7 +340,7 @@ export function NotesSidebar({ notebookId, draggedNoteIds }: NotesSidebarProps) 
         { notebookId, name: value, categoryId: addingInCategory },
         {
           onSuccess: () => {
-            utils.notes.listNotes.invalidate({ notebookId });
+            utils.notes.listNotes.invalidate();
             setNewItemName("");
             setAddingMode("none");
             setAddingInCategory(null);

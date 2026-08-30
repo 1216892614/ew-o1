@@ -3,6 +3,7 @@ import { notebooks } from "@lib/db";
 import { desc, lt, and, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { publicProcedure, router } from "../init";
+import { writeNotebookTomlToR2, updateNotebookMetaInR2 } from "../../utils/r2Sync";
 
 const NOTEBOOKS_PAGE_SIZE = 20;
 
@@ -67,6 +68,17 @@ export const notebooksRouter = router({
         createdAt: now,
       });
 
+      await writeNotebookTomlToR2(ctx.env.R2, id, {
+        meta: {
+          name: input.name,
+          description: input.description,
+          color: input.color,
+          icon: input.icon,
+          updated_at: now,
+        },
+        files: [],
+      });
+
       const [created] = await ctx.db
         .select()
         .from(notebooks)
@@ -93,6 +105,15 @@ export const notebooksRouter = router({
       updateData.updatedAt = new Date();
 
       await ctx.db.update(notebooks).set(updateData).where(eq(notebooks.id, id));
+
+      const metaUpdates: Record<string, unknown> = {};
+      if (fields.name !== undefined) metaUpdates.name = fields.name;
+      if (fields.description !== undefined) metaUpdates.description = fields.description;
+      if (fields.color !== undefined) metaUpdates.color = fields.color;
+      if (fields.icon !== undefined) metaUpdates.icon = fields.icon;
+      if (Object.keys(metaUpdates).length > 0) {
+        await updateNotebookMetaInR2(ctx.env.R2, id, metaUpdates as Parameters<typeof updateNotebookMetaInR2>[2]);
+      }
 
       const [updated] = await ctx.db
         .select()

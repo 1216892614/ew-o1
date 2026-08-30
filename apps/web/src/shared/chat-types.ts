@@ -44,7 +44,21 @@ export type AskEntry = {
 
 export type FinishEntry = { kind: "finish"; message: string };
 
-export type TimelineEntry = ThinkingEntry | ToolCallEntry | TextEntry | ReplyEntry | AskEntry | FinishEntry;
+export type AiSearchResultItem = {
+  fileId: string;
+  filename: string;
+  snippet: string;
+  score: number;
+};
+
+export type AiSearchEntry = {
+  kind: "ai_search";
+  query: string;
+  results: AiSearchResultItem[];
+  round: number;
+};
+
+export type TimelineEntry = ThinkingEntry | ToolCallEntry | TextEntry | ReplyEntry | AskEntry | FinishEntry | AiSearchEntry;
 
 /* ── Injected context (notes fed to AI as system prompt) ── */
 

@@ -1,8 +1,13 @@
 import { z } from "zod";
 import { notes, categories, sessions, notebooks } from "@lib/db";
-import { desc, eq, and, asc, inArray } from "drizzle-orm";
+import { desc, eq, and, asc, inArray, sql, notInArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { publicProcedure, router } from "../init";
+import {
+  addFileToNotebookToml,
+  updateFileInNotebookToml,
+  removeFileFromNotebookToml,
+} from "../../utils/r2Sync";
 
 export const notesRouter = router({
   getNotebook: publicProcedure
@@ -19,11 +24,32 @@ export const notesRouter = router({
   listCategories: publicProcedure
     .input(z.object({ notebookId: z.string() }))
     .query(async ({ input, ctx }) => {
-      return ctx.db
+      const allCats = await ctx.db
         .select()
         .from(categories)
         .where(eq(categories.notebookId, input.notebookId))
         .orderBy(asc(categories.position));
+
+      // Prune empty non-archive categories (they shouldn't persist in storage)
+      const emptyCatIds: string[] = [];
+      for (const cat of allCats) {
+        if (cat.isArchive) continue;
+        const [row] = await ctx.db
+          .select({ count: sql<number>`count(*)` })
+          .from(notes)
+          .where(eq(notes.categoryId, cat.id))
+          .limit(1);
+        if ((row?.count ?? 0) === 0) {
+          emptyCatIds.push(cat.id);
+        }
+      }
+      if (emptyCatIds.length > 0) {
+        await ctx.db
+          .delete(categories)
+          .where(inArray(categories.id, emptyCatIds));
+      }
+
+      return allCats.filter((c) => !emptyCatIds.includes(c.id));
     }),
 
   createCategory: publicProcedure
@@ -83,6 +109,22 @@ export const notesRouter = router({
         createdAt: now,
         updatedAt: now,
       });
+
+      let tag = "";
+      if (input.categoryId) {
+        const [cat] = await ctx.db
+          .select({ name: categories.name })
+          .from(categories)
+          .where(eq(categories.id, input.categoryId))
+          .limit(1);
+        tag = cat?.name ?? "";
+      }
+      await addFileToNotebookToml(ctx.env.R2, input.notebookId, {
+        filename: `${input.name}.md`,
+        id,
+        tag,
+      });
+
       return { id };
     }),
 
@@ -108,6 +150,36 @@ export const notesRouter = router({
       }
       updates.updatedAt = new Date();
       await ctx.db.update(notes).set(updates).where(eq(notes.id, id));
+
+      // Sync R2 toml when name or categoryId changes
+      const needsR2 = data.name !== undefined || data.categoryId !== undefined;
+      if (needsR2) {
+        const [note] = await ctx.db
+          .select({ notebookId: notes.notebookId })
+          .from(notes)
+          .where(eq(notes.id, id))
+          .limit(1);
+        if (note) {
+          const tomlUpdates: Partial<{ filename: string; tag: string }> = {};
+          if (data.name !== undefined) {
+            tomlUpdates.filename = `${data.name}.md`;
+          }
+          if (data.categoryId !== undefined) {
+            let tag = "";
+            if (data.categoryId) {
+              const [cat] = await ctx.db
+                .select({ name: categories.name })
+                .from(categories)
+                .where(eq(categories.id, data.categoryId))
+                .limit(1);
+              tag = cat?.name ?? "";
+            }
+            tomlUpdates.tag = tag;
+          }
+          await updateFileInNotebookToml(ctx.env.R2, note.notebookId, id, tomlUpdates);
+        }
+      }
+
       return { id };
     }),
 
@@ -129,12 +201,44 @@ export const notesRouter = router({
         .update(notes)
         .set(updates)
         .where(inArray(notes.id, ids));
+
+      // Sync tag to R2 when categoryId changes
+      if (data.categoryId !== undefined) {
+        let tag = "";
+        if (data.categoryId) {
+          const [cat] = await ctx.db
+            .select({ name: categories.name })
+            .from(categories)
+            .where(eq(categories.id, data.categoryId))
+            .limit(1);
+          tag = cat?.name ?? "";
+        }
+        const affectedNotes = await ctx.db
+          .select({ id: notes.id, notebookId: notes.notebookId })
+          .from(notes)
+          .where(inArray(notes.id, ids));
+        await Promise.all(
+          affectedNotes.map((n) =>
+            updateFileInNotebookToml(ctx.env.R2, n.notebookId, n.id, { tag }),
+          ),
+        );
+      }
     }),
 
   deleteNote: publicProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
+      const [note] = await ctx.db
+        .select({ notebookId: notes.notebookId })
+        .from(notes)
+        .where(eq(notes.id, input.id))
+        .limit(1);
+
       await ctx.db.delete(notes).where(eq(notes.id, input.id));
+
+      if (note) {
+        await removeFileFromNotebookToml(ctx.env.R2, note.notebookId, input.id);
+      }
     }),
 
   // Sessions

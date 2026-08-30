@@ -22,6 +22,7 @@ import {
   GearSix,
   Lightning,
   Files,
+  MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { trpc } from "@/client/lib/trpc";
@@ -41,6 +42,7 @@ import type {
   AskEntry,
   AskQuestion,
   FinishEntry,
+  AiSearchEntry,
   InjectedContextItem,
 } from "@/shared/chat-types";
 import {
@@ -392,7 +394,8 @@ export function AgentChat({
             ];
           }
           case "finish": {
-            updateStreaming((s) => ({ ...s, status: "done" }));
+            /* Don't set status:"done" here — the stream is still open.
+               finalizeStreaming() will set the terminal status once the SSE stream closes. */
             return [...before, { kind: "finish", message: (parsed.message ?? "") as string }, ...after];
           }
           default:
@@ -506,8 +509,8 @@ export function AgentChat({
                   (e): e is ToolCallEntry => e.kind === "tool_call" && e.toolCallId === tcId,
                 )?.name;
                 if (toolName && FILE_MUTATING_TOOLS.has(toolName)) {
-                  utils.notes.listNotes.invalidate({ notebookId });
-                  utils.notes.listCategories.invalidate({ notebookId });
+                  utils.notes.listNotes.invalidate();
+                  utils.notes.listCategories.invalidate();
                 }
                 break;
               }
@@ -538,7 +541,9 @@ export function AgentChat({
               }
 
               case "RUN_FINISHED": {
-                updateStreaming((s) => ({ ...s, status: "done" }));
+                /* Status is set by finalizeStreaming() when the stream actually closes.
+                   TanStack AI emits RUN_FINISHED between each agent-loop iteration,
+                   so treating it as terminal here kills the timer mid-run. */
                 break;
               }
               case "RUN_ERROR": {
@@ -554,6 +559,10 @@ export function AgentChat({
                     ...s,
                     injectedContext: data.items as InjectedContextItem[],
                   }));
+                }
+                if (data?.type === "ai_search" && data.entry) {
+                  const searchEntry = data.entry as AiSearchEntry;
+                  updateTimeline((tl) => [searchEntry, ...tl]);
                 }
                 break;
               }
@@ -943,7 +952,7 @@ function AssistantBlock({
   notebookId: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const hasTimelineEvents = node.timeline.some((t) => t.kind === "thinking" || t.kind === "tool_call");
+  const hasTimelineEvents = node.timeline.some((t) => t.kind === "thinking" || t.kind === "tool_call" || t.kind === "ai_search");
   const createNoteMut = trpc.notes.createNote.useMutation();
   const updateNoteMut = trpc.notes.updateNote.useMutation();
   const utils = trpc.useUtils();
@@ -958,7 +967,7 @@ function AssistantBlock({
     const name = node.content.slice(0, 40).replace(/[^a-zA-Z0-9\u4e00-\u9fff\s-]/g, "").trim() || "untitled";
     const { id } = await createNoteMut.mutateAsync({ notebookId, categoryId: null, name });
     await updateNoteMut.mutateAsync({ id, content: node.content });
-    await utils.notes.listNotes.invalidate({ notebookId });
+    await utils.notes.listNotes.invalidate();
   }
 
   /* Compute elapsed from timeline */
@@ -1135,6 +1144,8 @@ function timelineDotIcon(entry: TimelineEntry) {
       return entry.done
         ? <Wrench size={11} className="text-base-content/30" />
         : <GearSix size={11} className="text-info/70 animate-spin" />;
+    case "ai_search":
+      return <MagnifyingGlass size={11} weight="duotone" className="text-info/60" />;
     case "reply":
       return <ChatText size={11} className="text-base-content/30" />;
     case "ask":
@@ -1160,6 +1171,8 @@ function TimelineStepContent({
       return <ThinkingContent entry={entry} />;
     case "tool_call":
       return <ToolCallContent entry={entry} />;
+    case "ai_search":
+      return <AiSearchContent entry={entry} />;
     case "reply":
       return <span className="text-xs text-base-content/60 leading-relaxed">{entry.message}</span>;
     case "ask":
@@ -1219,6 +1232,41 @@ function ToolCallContent({ entry }: { entry: ToolCallEntry }) {
               {tryFormatJson(entry.result)}
             </pre>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── AI Search results (collapsible) ─────────────────────── */
+
+function AiSearchContent({ entry }: { entry: AiSearchEntry }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="text-xs text-base-content/50 hover:text-base-content/70 flex items-center gap-1 leading-relaxed"
+        onClick={() => setOpen(!open)}
+      >
+        <span>搜索了 {entry.results.length} 条相关内容</span>
+        <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
+      </button>
+      {open && (
+        <div className="text-xs mt-1 space-y-1.5 max-h-48 overflow-y-auto">
+          {entry.results.map((item, i) => (
+            <div key={`${item.fileId}-${i}`} className="bg-base-200 rounded p-2">
+              <div className="flex items-center gap-1.5 text-base-content/60 mb-0.5">
+                <Files size={10} weight="duotone" />
+                <span className="font-medium truncate max-w-[200px]">{item.filename}</span>
+                <span className="text-[10px] text-base-content/30 ml-auto">{(item.score * 100).toFixed(0)}%</span>
+              </div>
+              <p className="text-[11px] text-base-content/40 line-clamp-3 leading-relaxed">
+                {item.snippet}
+              </p>
+            </div>
+          ))}
         </div>
       )}
     </div>

@@ -97,8 +97,17 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
     } else if (dropId.startsWith("category-")) {
       const categoryId = dropId.replace("category-", "");
       batchUpdate.mutate(
-        { ids: draggedNoteIds, categoryId: categoryId === "uncategorized" ? null : categoryId },
-        { onSuccess: () => utils.notes.listNotes.invalidate() },
+        {
+          ids: draggedNoteIds,
+          categoryId: categoryId === "uncategorized" ? null : categoryId,
+          ...(categoryId === "uncategorized" ? { active: false } : {}),
+        },
+        {
+          onSuccess: () => {
+            utils.notes.listNotes.invalidate();
+            utils.notes.listCategories.invalidate();
+          },
+        },
       );
     }
 

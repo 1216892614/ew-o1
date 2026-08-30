@@ -11,6 +11,8 @@ import type {
   ReplyEntry,
   AskEntry,
   FinishEntry,
+  AiSearchEntry,
+  AiSearchResultItem,
   ChatRequestBody,
   ChatMessagesResponse,
   InjectedContextItem,
@@ -219,6 +221,42 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       );
     }
 
+    /* ── AI Search: auto-retrieve relevant context from notebook ── */
+    let aiSearchEntry: AiSearchEntry | null = null;
+    if (this.env.AI_SEARCH) {
+      try {
+        const searchInstance = this.env.AI_SEARCH.get(this.notebookId);
+        const searchResults = await searchInstance.search({
+          messages: [{ role: "user", content: body.message }],
+          ai_search_options: {
+            retrieval: { retrieval_type: "hybrid", max_num_results: 5 },
+          },
+        });
+        if (searchResults.chunks && searchResults.chunks.length > 0) {
+          const resultItems: AiSearchResultItem[] = searchResults.chunks.map((chunk) => ({
+            fileId: (chunk.item.metadata?.id as string) ?? chunk.item.key ?? "",
+            filename: (chunk.item.metadata?.name as string) ?? chunk.item.key ?? "",
+            snippet: chunk.text.slice(0, 300),
+            score: chunk.score,
+          }));
+          aiSearchEntry = {
+            kind: "ai_search",
+            query: body.message,
+            results: resultItems,
+            round: 1,
+          };
+          const searchContext = resultItems
+            .map((r) => `### ${r.filename} (relevance: ${r.score.toFixed(2)})\n${r.snippet}`)
+            .join("\n\n---\n\n");
+          systemPrompts.push(
+            `AI Search found the following relevant passages from the notebook for the user's query:\n\n${searchContext}`,
+          );
+        }
+      } catch {
+        // AI Search unavailable; continue without it
+      }
+    }
+
     const adapter = this.createAdapter(body.model);
 
     const self = this;
@@ -268,6 +306,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       body.modelProvider ?? "",
       body.model,
       injectedContext,
+      aiSearchEntry,
     );
 
     return toServerSentEventsResponse(teedStream, {
@@ -311,13 +350,22 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     modelProvider: string,
     model: string,
     injectedContext: InjectedContextItem[],
+    aiSearchEntry: AiSearchEntry | null,
   ): AsyncIterable<StreamChunk> {
     /* Emit injected context as first event so client can display it */
     if (injectedContext.length > 0) {
       yield { type: "CUSTOM", data: { type: "injected_context", items: injectedContext } } as unknown as StreamChunk;
     }
 
+    /* Emit AI Search results so client can display them in timeline */
+    if (aiSearchEntry) {
+      yield { type: "CUSTOM", data: { type: "ai_search", entry: aiSearchEntry } } as unknown as StreamChunk;
+    }
+
     const timeline: TimelineEntry[] = [];
+    if (aiSearchEntry) {
+      timeline.push(aiSearchEntry);
+    }
     const contentParts: string[] = [];
 
     for await (const chunk of stream) {
