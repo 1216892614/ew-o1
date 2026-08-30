@@ -52,3 +52,9 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatSessionDO"]
+
+
+[[migrations]]
+tag = "v2"
+renamed_classes = [{ from = "ChatSession", to = "ChatSessionDO" }]
+deleted_classes = ["SearXNG"]
