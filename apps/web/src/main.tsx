@@ -6,6 +6,7 @@ import { chatRoute } from "./server/chat/route";
 import { uploadRoute } from "./server/uploadRoute";
 
 export { ChatSessionDO } from "./server/chat/ChatSessionDO";
+export { SearXNG } from "./server/searxng/SearXNG";
 
 export const app = new Hono<HonoCtxEnv>();
 

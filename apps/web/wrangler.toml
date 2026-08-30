@@ -46,15 +46,22 @@ CF_AI_GATEWAY_ID = "ew-ai-gateway"
 
 [durable_objects]
 bindings = [
-  { name = "CHAT_DO", class_name = "ChatSessionDO" }
+  { name = "CHAT_DO", class_name = "ChatSessionDO" },
+  { name = "SEARXNG", class_name = "SearXNG" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatSessionDO"]
 
-
 [[migrations]]
 tag = "v2"
-renamed_classes = [{ from = "ChatSession", to = "ChatSessionDO" }]
-deleted_classes = ["SearXNG"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["SearXNG"]
+
+[[containers]]
+class_name = "SearXNG"
+image = "registry.cloudflare.com/3244c8f91cd34317ce18652158e5853a/ew-o1-searxng:62caf439"
+max_instances = 2

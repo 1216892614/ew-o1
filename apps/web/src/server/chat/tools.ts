@@ -2,6 +2,7 @@ import { z } from "zod";
 import { applyPatch } from "diff";
 import type { AnyTool } from "@tanstack/ai";
 import { upsertNoteToAiSearch, searchNotebook } from "../utils/aiSearchSync";
+import { getContainer } from "@cloudflare/containers";
 
 function tool<TInput extends z.ZodType, TOutput extends z.ZodType>(def: {
   name: string;
@@ -460,18 +461,72 @@ export function createAgentTools(params: CreateAgentToolsParams) {
 
     tool({
       name: "web_search",
-      description: "Search the web. (Not yet implemented.)",
-      inputSchema: z.object({ query: z.string() }),
-      outputSchema: z.object({ results: z.array(z.object({ title: z.string(), url: z.string(), snippet: z.string() })) }),
-      execute: async () => ({ results: [] }),
+      description:
+        "Search the web using SearXNG. Returns top results with title, URL, and snippet.\n" +
+        "Use for factual lookups, current events, or any question that needs web information.",
+      inputSchema: z.object({
+        query: z.string().describe("The search query"),
+        max_results: z.number().optional().describe("Max results to return (default 5, max 20)"),
+      }),
+      outputSchema: z.object({
+        results: z.array(z.object({ title: z.string(), url: z.string(), snippet: z.string() })),
+      }),
+      execute: async (args) => {
+        try {
+          
+          const container = getContainer(env.SEARXNG, "default");
+          const limit = Math.min(args.max_results ?? 5, 20);
+          const params = new URLSearchParams({
+            q: args.query,
+            format: "json",
+            categories: "general",
+          });
+          const res = await container.fetch(`http://container/search?${params}`);
+          if (!res.ok) {
+            return { results: [{ title: "Search error", url: "", snippet: `SearXNG returned ${res.status}` }] };
+          }
+          const data = (await res.json()) as { results?: { title?: string; url?: string; content?: string }[] };
+          const results = (data.results ?? []).slice(0, limit).map((r) => ({
+            title: r.title ?? "",
+            url: r.url ?? "",
+            snippet: r.content ?? "",
+          }));
+          return { results };
+        } catch (err) {
+          return { results: [{ title: "Search error", url: "", snippet: String(err) }] };
+        }
+      },
     }),
 
     tool({
       name: "web_page_read",
-      description: "Read a web page as markdown. (Not yet implemented.)",
-      inputSchema: z.object({ url: z.string() }),
+      description:
+        "Read a web page and return its text content. Uses SearXNG as a proxy to fetch the page.",
+      inputSchema: z.object({ url: z.string().describe("Full URL of the web page to read") }),
       outputSchema: z.object({ title: z.string(), content: z.string() }),
-      execute: async () => ({ title: "Not implemented", content: "Browser rendering not yet wired." }),
+      execute: async (args) => {
+        try {
+          
+          const container = getContainer(env.SEARXNG, "default");
+          // Use SearXNG's search with site: to get a cached/extracted snippet
+          const params = new URLSearchParams({
+            q: `cache:${args.url}`,
+            format: "json",
+          });
+          const res = await container.fetch(`http://container/search?${params}`);
+          if (!res.ok) {
+            return { title: "Fetch error", content: `SearXNG returned ${res.status}` };
+          }
+          const data = (await res.json()) as { results?: { title?: string; content?: string; url?: string }[] };
+          const match = data.results?.find((r) => r.url === args.url) ?? data.results?.[0];
+          return {
+            title: match?.title ?? "Unknown",
+            content: match?.content ?? "No content extracted.",
+          };
+        } catch (err) {
+          return { title: "Fetch error", content: String(err) };
+        }
+      },
     }),
 
     tool({
