@@ -1,60 +1,70 @@
-import { useState, useRef, useEffect, useCallback, useMemo, type KeyboardEvent } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import {
-  ChatCircleDots,
-  PaperPlaneRight,
+  ArrowCounterClockwise,
+  ArrowsInSimple,
+  Brain,
   CaretDown,
   CaretLeft,
   CaretRight,
-  Stop,
-  Plus,
-  Copy,
-  PencilSimple,
-  ArrowCounterClockwise,
-  Check,
-  X,
-  FilePlus,
+  ChatCircleDots,
   ChatText,
+  Check,
   CheckCircle,
-  Hourglass,
-  Brain,
-  Wrench,
-  GearSix,
-  Lightning,
+  Copy,
+  FilePlus,
   Files,
+  GearSix,
+  Hourglass,
+  Lightning,
   MagnifyingGlass,
   Paperclip,
+  PaperPlaneRight,
+  PencilSimple,
+  Plus,
+  Stop,
   UploadSimple,
-  ArrowsInSimple,
+  Wrench,
+  X,
 } from "@phosphor-icons/react";
+import { useSetAtom } from "jotai";
+import {
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import toast from "react-hot-toast";
 import { Streamdown } from "streamdown";
 import { trpc } from "@/client/lib/trpc";
-import toast from "react-hot-toast";
-import { type ModelConfig, MODELS } from "./ModelSelector";
 import type {
-  ChatNode,
-  UserNode,
-  AssistantNode,
-  TimelineEntry,
-  ThinkingEntry,
-  ToolCallEntry,
-  TextEntry,
-  ChatRequestBody,
-  ChatMessagesResponse,
-  ChatAnswerBody,
-  ReplyEntry,
+  AiSearchEntry,
   AskEntry,
   AskQuestion,
+  AssistantNode,
+  AttachedFile,
+  ChatAnswerBody,
+  ChatMessagesResponse,
+  ChatNode,
+  ChatRequestBody,
   FinishEntry,
-  AiSearchEntry,
   InjectedContextItem,
+  ReplyEntry,
+  TextEntry,
+  ThinkingEntry,
+  TimelineEntry,
+  ToolCallEntry,
+  UserNode,
 } from "@/shared/chat-types";
 import {
-  resolvePathToLeaf,
-  findLatestLeaf,
   buildChildrenMap,
+  findLatestLeaf,
   getSiblingInfo,
+  resolvePathToLeaf,
 } from "@/shared/chat-types";
+import { MODELS, type ModelConfig } from "./ModelSelector";
+import { lastToolFocusAtom } from "./state";
 
 const FILE_MUTATING_TOOLS = new Set(["edit_file", "edit_content"]);
 
@@ -93,7 +103,14 @@ interface StreamingAssistant {
   modelName: string;
   modelProvider: string;
   startTime: number;
-  status: "sending" | "thinking" | "tool_call" | "replying" | "waiting" | "done" | "error";
+  status:
+    | "sending"
+    | "thinking"
+    | "tool_call"
+    | "replying"
+    | "waiting"
+    | "done"
+    | "error";
   timeline: TimelineEntry[];
   injectedContext?: InjectedContextItem[];
 }
@@ -118,10 +135,13 @@ export function AgentChat({
   notesList,
 }: AgentChatProps) {
   const [allNodes, setAllNodes] = useState<ChatNode[]>([]);
-  const [streamingAssistant, setStreamingAssistantState] = useState<StreamingAssistant | null>(null);
+  const [streamingAssistant, setStreamingAssistantState] =
+    useState<StreamingAssistant | null>(null);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [attachedNoteIds, setAttachedNoteIds] = useState<Set<string>>(new Set());
+  const [attachedNoteIds, setAttachedNoteIds] = useState<Set<string>>(
+    new Set(),
+  );
   const [showAttachPopover, setShowAttachPopover] = useState(false);
   const [isCompressing, setIsCompressing] = useState(false);
   const [compressMode, setCompressMode] = useState<"native" | "soft">(() => {
@@ -138,20 +158,29 @@ export function AgentChat({
   const abortControllerRef = useRef<AbortController | null>(null);
   const skipLoadHistoryRef = useRef(false);
   const streamingAssistantRef = useRef<StreamingAssistant | null>(null);
+  const setLastToolFocus = useSetAtom(lastToolFocusAtom);
 
   /* Wrapper to keep ref in sync with state */
-  const setStreamingAssistant = useCallback((action: StreamingAssistant | null | ((prev: StreamingAssistant | null) => StreamingAssistant | null)) => {
-    if (typeof action === "function") {
-      setStreamingAssistantState((prev) => {
-        const next = action(prev);
-        streamingAssistantRef.current = next;
-        return next;
-      });
-    } else {
-      streamingAssistantRef.current = action;
-      setStreamingAssistantState(action);
-    }
-  }, []);
+  const setStreamingAssistant = useCallback(
+    (
+      action:
+        | StreamingAssistant
+        | null
+        | ((prev: StreamingAssistant | null) => StreamingAssistant | null),
+    ) => {
+      if (typeof action === "function") {
+        setStreamingAssistantState((prev) => {
+          const next = action(prev);
+          streamingAssistantRef.current = next;
+          return next;
+        });
+      } else {
+        streamingAssistantRef.current = action;
+        setStreamingAssistantState(action);
+      }
+    },
+    [],
+  );
 
   const utils = trpc.useUtils();
   const { data: sessions } = trpc.notes.listSessions.useQuery({ notebookId });
@@ -196,7 +225,9 @@ export function AgentChat({
   function restoreModelConfig(nodes: ChatNode[]) {
     const userNodes = nodes.filter((n): n is UserNode => n.role === "user");
     if (userNodes.length === 0) return;
-    const last = userNodes.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
+    const last = userNodes.reduce((a, b) =>
+      a.createdAt > b.createdAt ? a : b,
+    );
     const found = MODELS.find((m) => m.id === last.model);
     if (!found) return;
     const defaultMax = found.thinking ? 16384 : 8192;
@@ -230,17 +261,14 @@ export function AgentChat({
   }
 
   /* Note drop */
-  const handleNoteDrop = useCallback(
-    (droppedIds: string[]) => {
-      setAttachedNoteIds((prev) => {
-        const next = new Set(prev);
-        for (const id of droppedIds) next.add(id);
-        return next;
-      });
-      setTimeout(() => textareaRef.current?.focus(), 0);
-    },
-    [],
-  );
+  const handleNoteDrop = useCallback((droppedIds: string[]) => {
+    setAttachedNoteIds((prev) => {
+      const next = new Set(prev);
+      for (const id of droppedIds) next.add(id);
+      return next;
+    });
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }, []);
 
   useEffect(() => {
     if (droppedNoteIdsForChat.length > 0) {
@@ -300,70 +328,76 @@ export function AgentChat({
   /* Compress conversation */
   const updateCompressMode = useCallback((mode: "native" | "soft") => {
     setCompressMode(mode);
-    try { localStorage.setItem("ew-compress-mode", mode); } catch {}
+    try {
+      localStorage.setItem("ew-compress-mode", mode);
+    } catch {}
   }, []);
 
-  const handleCompress = useCallback(
-    async () => {
-      if (!currentSessionId || isCompressing) return;
-      setIsCompressing(true);
-      try {
-        const response = await fetch("/api/chat/compress", {
+  const handleCompress = useCallback(async () => {
+    if (!currentSessionId || isCompressing) return;
+    setIsCompressing(true);
+    try {
+      const response = await fetch("/api/chat/compress", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: currentSessionId,
+          notebookId,
+          mode: compressMode,
+          model: modelConfig.model.id,
+          leafId,
+        }),
+      });
+      const result = (await response.json()) as {
+        success: boolean;
+        supported?: boolean;
+        summary?: string;
+      };
+      if (compressMode === "native" && result.supported === false) {
+        toast("当前模型不支持原生压缩，已回退到软压缩", { icon: "⚠️" });
+        setIsCompressing(true);
+        const fallbackResp = await fetch("/api/chat/compress", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             sessionId: currentSessionId,
             notebookId,
-            mode: compressMode,
+            mode: "soft",
             model: modelConfig.model.id,
             leafId,
           }),
         });
-        const result = (await response.json()) as {
+        const fallbackResult = (await fallbackResp.json()) as {
           success: boolean;
-          supported?: boolean;
           summary?: string;
         };
-        if (compressMode === "native" && result.supported === false) {
-          toast("当前模型不支持原生压缩，已回退到软压缩", { icon: "⚠️" });
-          setIsCompressing(true);
-          const fallbackResp = await fetch("/api/chat/compress", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: currentSessionId,
-              notebookId,
-              mode: "soft",
-              model: modelConfig.model.id,
-              leafId,
-            }),
-          });
-          const fallbackResult = (await fallbackResp.json()) as {
-            success: boolean;
-            summary?: string;
-          };
-          if (!fallbackResult.success) {
-            toast.error(fallbackResult.summary ?? "压缩失败");
-            return;
-          }
-          toast.success("对话已压缩（软压缩）");
-          await loadHistory(notebookId, currentSessionId);
+        if (!fallbackResult.success) {
+          toast.error(fallbackResult.summary ?? "压缩失败");
           return;
         }
-        if (!result.success) {
-          toast.error(result.summary ?? "压缩失败");
-          return;
-        }
-        toast.success("对话已压缩");
+        toast.success("对话已压缩（软压缩）");
         await loadHistory(notebookId, currentSessionId);
-      } catch {
-        toast.error("压缩失败");
-      } finally {
-        setIsCompressing(false);
+        return;
       }
-    },
-    [currentSessionId, notebookId, modelConfig.model.id, leafId, isCompressing, compressMode],
-  );
+      if (!result.success) {
+        toast.error(result.summary ?? "压缩失败");
+        return;
+      }
+      toast.success("对话已压缩");
+      await loadHistory(notebookId, currentSessionId);
+    } catch {
+      toast.error("压缩失败");
+    } finally {
+      setIsCompressing(false);
+    }
+  }, [
+    currentSessionId,
+    notebookId,
+    modelConfig.model.id,
+    leafId,
+    isCompressing,
+    compressMode,
+  ]);
 
   /* ── Navigate to a different leaf ─────────────────────── */
   function navigateToLeaf(nodeId: string) {
@@ -379,16 +413,25 @@ export function AgentChat({
   }
 
   /* ── Send message ─────────────────────────────────────── */
-  async function sendMessage(overrideText?: string, parentIdOverride?: string | null) {
+  async function sendMessage(
+    overrideText?: string,
+    parentIdOverride?: string | null,
+  ) {
     const rawText = overrideText ?? input.trim();
     if (!rawText || isStreaming) return;
 
-    let text = rawText;
+    const text = rawText;
+
+    /* Build attached files list with word count */
     const currentAttached = [...attachedNoteIds];
-    if (currentAttached.length > 0 && !overrideText) {
-      const noteRefs = currentAttached.map((id) => `[${id}]`).join(", ");
-      text = `用户引用了标记: ${noteRefs}\n---\n${rawText}`;
-    }
+    const attachedFiles: AttachedFile[] = !overrideText
+      ? currentAttached.flatMap((id) => {
+          const note = notesList.find((n) => n.id === id);
+          if (!note) return [];
+          const wordCount = note.content ? note.content.length : 0;
+          return [{ id: note.id, name: note.name, wordCount }];
+        })
+      : [];
 
     let sessionId = currentSessionId;
 
@@ -407,11 +450,12 @@ export function AgentChat({
     }
 
     /* Determine parentId: the last node on the active path, or override */
-    const parentId = parentIdOverride !== undefined
-      ? parentIdOverride
-      : activePath.length > 0
-        ? activePath[activePath.length - 1].id
-        : null;
+    const parentId =
+      parentIdOverride !== undefined
+        ? parentIdOverride
+        : activePath.length > 0
+          ? activePath[activePath.length - 1].id
+          : null;
 
     if (!overrideText) {
       setInput("");
@@ -423,10 +467,6 @@ export function AgentChat({
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    const activeNotes = notesList
-      .filter((n) => n.active && n.content)
-      .map((n) => ({ name: n.name, id: n.id }));
-
     /* Optimistic user node — shows immediately */
     const tempUserNodeId = `temp_${Date.now()}`;
     const optimisticUserNode: UserNode = {
@@ -434,6 +474,7 @@ export function AgentChat({
       role: "user",
       parentId,
       content: text,
+      attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
       model: modelConfig.model.id,
       modelName: modelConfig.model.name,
       modelProvider: modelConfig.model.provider,
@@ -457,8 +498,12 @@ export function AgentChat({
     try {
       const systemPrompt = [
         `You are an AI assistant for the notebook "${notebookName}".`,
-        notebookDescription ? `Notebook description: ${notebookDescription}` : "",
-      ].filter(Boolean).join(" ");
+        notebookDescription
+          ? `Notebook description: ${notebookDescription}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
 
       const requestBody: ChatRequestBody = {
         sessionId,
@@ -470,7 +515,7 @@ export function AgentChat({
         modelProvider: modelConfig.model.provider,
         modelParams: modelConfig.params,
         systemPrompt,
-        activeNotes,
+        attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
       };
 
       const response = await fetch("/api/chat", {
@@ -491,11 +536,19 @@ export function AgentChat({
       /* Replace temp user node ID with server-assigned ID */
       if (serverUserNodeId) {
         setAllNodes((prev) =>
-          prev.map((n) => (n.id === tempUserNodeId ? { ...n, id: serverUserNodeId } : n)),
+          prev.map((n) =>
+            n.id === tempUserNodeId ? { ...n, id: serverUserNodeId } : n,
+          ),
         );
         setLeafId(serverUserNodeId);
         setStreamingAssistant((prev) =>
-          prev ? { ...prev, parentId: serverUserNodeId, id: serverAssistantNodeId ?? prev.id } : prev,
+          prev
+            ? {
+                ...prev,
+                parentId: serverUserNodeId,
+                id: serverAssistantNodeId ?? prev.id,
+              }
+            : prev,
         );
       }
 
@@ -503,7 +556,9 @@ export function AgentChat({
       const decoder = new TextDecoder();
       let buffer = "";
 
-      const updateStreaming = (fn: (s: StreamingAssistant) => StreamingAssistant) => {
+      const updateStreaming = (
+        fn: (s: StreamingAssistant) => StreamingAssistant,
+      ) => {
         setStreamingAssistant((prev) => (prev ? fn(prev) : prev));
       };
 
@@ -518,12 +573,22 @@ export function AgentChat({
         return null;
       };
 
-      const appendInteractiveEntry = (tl: TimelineEntry[], tc: ToolCallEntry): TimelineEntry[] => {
+      const appendInteractiveEntry = (
+        tl: TimelineEntry[],
+        tc: ToolCallEntry,
+      ): TimelineEntry[] => {
         if (!["reply", "ask", "finish"].includes(tc.name)) return tl;
-        const tcIndex = tl.findIndex((e) => e.kind === "tool_call" && e.toolCallId === tc.toolCallId);
+        const tcIndex = tl.findIndex(
+          (e) => e.kind === "tool_call" && e.toolCallId === tc.toolCallId,
+        );
         if (tcIndex < 0) return tl;
         const nextEntry = tl[tcIndex + 1];
-        if (nextEntry && (nextEntry.kind === "reply" || nextEntry.kind === "ask" || nextEntry.kind === "finish")) {
+        if (
+          nextEntry &&
+          (nextEntry.kind === "reply" ||
+            nextEntry.kind === "ask" ||
+            nextEntry.kind === "finish")
+        ) {
           return tl;
         }
         let parsed: Record<string, unknown>;
@@ -536,7 +601,11 @@ export function AgentChat({
         const after = tl.slice(tcIndex + 1);
         switch (tc.name) {
           case "reply":
-            return [...before, { kind: "reply", message: (parsed.message ?? "") as string }, ...after];
+            return [
+              ...before,
+              { kind: "reply", message: (parsed.message ?? "") as string },
+              ...after,
+            ];
           case "ask": {
             updateStreaming((s) => ({ ...s, status: "waiting" }));
             return [
@@ -552,7 +621,11 @@ export function AgentChat({
           case "finish": {
             /* Don't set status:"done" here — the stream is still open.
                finalizeStreaming() will set the terminal status once the SSE stream closes. */
-            return [...before, { kind: "finish", message: (parsed.message ?? "") as string }, ...after];
+            return [
+              ...before,
+              { kind: "finish", message: (parsed.message ?? "") as string },
+              ...after,
+            ];
           }
           default:
             return tl;
@@ -580,7 +653,10 @@ export function AgentChat({
               case "THINKING_START":
               case "REASONING_START": {
                 updateStreaming((s) => ({ ...s, status: "thinking" }));
-                updateTimeline((tl) => [...tl, { kind: "thinking", content: "", done: false }]);
+                updateTimeline((tl) => [
+                  ...tl,
+                  { kind: "thinking", content: "", done: false },
+                ]);
                 break;
               }
               case "THINKING_TEXT_MESSAGE_CONTENT":
@@ -588,16 +664,27 @@ export function AgentChat({
                 const delta = (evt.delta ?? evt.content ?? "") as string;
                 if (!delta) break;
                 updateTimeline((tl) => {
-                  const last = lastEntry(tl, "thinking") as ThinkingEntry | null;
-                  if (!last) return [...tl, { kind: "thinking", content: delta, done: false }];
-                  return tl.map((e) => (e === last ? { ...last, content: last.content + delta } : e));
+                  const last = lastEntry(
+                    tl,
+                    "thinking",
+                  ) as ThinkingEntry | null;
+                  if (!last)
+                    return [
+                      ...tl,
+                      { kind: "thinking", content: delta, done: false },
+                    ];
+                  return tl.map((e) =>
+                    e === last ? { ...last, content: last.content + delta } : e,
+                  );
                 });
                 break;
               }
               case "THINKING_END":
               case "REASONING_END": {
                 updateTimeline((tl) =>
-                  tl.map((e) => (e.kind === "thinking" && !e.done ? { ...e, done: true } : e)),
+                  tl.map((e) =>
+                    e.kind === "thinking" && !e.done ? { ...e, done: true } : e,
+                  ),
                 );
                 break;
               }
@@ -609,7 +696,9 @@ export function AgentChat({
                   {
                     kind: "tool_call",
                     toolCallId: evt.toolCallId as string,
-                    name: (evt.toolCallName ?? evt.toolName ?? "tool") as string,
+                    name: (evt.toolCallName ??
+                      evt.toolName ??
+                      "tool") as string,
                     args: "",
                     done: false,
                   },
@@ -630,7 +719,8 @@ export function AgentChat({
               }
               case "TOOL_CALL_END": {
                 const tcId = evt.toolCallId as string;
-                const result = evt.result != null ? JSON.stringify(evt.result) : undefined;
+                const result =
+                  evt.result != null ? JSON.stringify(evt.result) : undefined;
                 updateTimeline((tl) => {
                   const updated = tl.map((e) =>
                     e.kind === "tool_call" && e.toolCallId === tcId
@@ -638,7 +728,8 @@ export function AgentChat({
                       : e,
                   );
                   const tc = updated.find(
-                    (e): e is ToolCallEntry => e.kind === "tool_call" && e.toolCallId === tcId,
+                    (e): e is ToolCallEntry =>
+                      e.kind === "tool_call" && e.toolCallId === tcId,
                   );
                   if (!tc) return updated;
                   return appendInteractiveEntry(updated, tc);
@@ -655,43 +746,96 @@ export function AgentChat({
                       : e,
                   );
                   const tc = updated.find(
-                    (e): e is ToolCallEntry => e.kind === "tool_call" && e.toolCallId === tcId,
+                    (e): e is ToolCallEntry =>
+                      e.kind === "tool_call" && e.toolCallId === tcId,
                   );
                   if (!tc) return updated;
                   return appendInteractiveEntry(updated, tc);
                 });
 
-                const toolName = streamingAssistantRef.current?.timeline.find(
-                  (e): e is ToolCallEntry => e.kind === "tool_call" && e.toolCallId === tcId,
-                )?.name;
-                if (toolName && FILE_MUTATING_TOOLS.has(toolName)) {
-                  utils.notes.listNotes.invalidate();
-                  utils.notes.listCategories.invalidate();
+                /* ── Emit tool focus for follow mode ──── */
+                const completedTc =
+                  streamingAssistantRef.current?.timeline.find(
+                    (e): e is ToolCallEntry =>
+                      e.kind === "tool_call" && e.toolCallId === tcId,
+                  );
+                if (completedTc) {
+                  try {
+                    const args = JSON.parse(completedTc.args);
+                    if (completedTc.name === "read_file" && content) {
+                      const res = JSON.parse(content);
+                      if (res.content) {
+                        setLastToolFocus({
+                          type: "read",
+                          fileId: args.file_id ?? res.file_id ?? "",
+                          filename: res.filename ?? "",
+                          content: res.content ?? "",
+                          totalLines: res.total_lines ?? 0,
+                          lineStart: args.line_start,
+                          lineEnd: args.line_end,
+                        });
+                      }
+                    } else if (completedTc.name === "edit_content" && content) {
+                      const res = JSON.parse(content);
+                      setLastToolFocus({
+                        type: "edit",
+                        fileId: args.file_id ?? res.file_id ?? "",
+                        filename: res.filename ?? "",
+                        diff: args.diff ?? "",
+                        result: content,
+                      });
+                    }
+                  } catch {
+                    // ignore parse failures
+                  }
+
+                  if (
+                    completedTc.name &&
+                    FILE_MUTATING_TOOLS.has(completedTc.name)
+                  ) {
+                    utils.notes.listNotes.invalidate();
+                    utils.notes.listCategories.invalidate();
+                  }
                 }
                 break;
               }
 
               case "TEXT_MESSAGE_START": {
                 updateStreaming((s) => ({ ...s, status: "replying" }));
-                updateTimeline((tl) => [...tl, { kind: "text", content: "", streaming: true }]);
+                updateTimeline((tl) => [
+                  ...tl,
+                  { kind: "text", content: "", streaming: true },
+                ]);
                 break;
               }
               case "TEXT_MESSAGE_CONTENT": {
                 const delta = (evt.delta ?? "") as string;
                 if (!delta) break;
-                updateStreaming((s) => (s.status !== "replying" ? { ...s, status: "replying" } : s));
+                updateStreaming((s) =>
+                  s.status !== "replying" ? { ...s, status: "replying" } : s,
+                );
                 updateTimeline((tl) => {
                   const last = tl[tl.length - 1];
                   if (last?.kind === "text" && last.streaming) {
-                    return [...tl.slice(0, -1), { ...last, content: last.content + delta }];
+                    return [
+                      ...tl.slice(0, -1),
+                      { ...last, content: last.content + delta },
+                    ];
                   }
-                  return [...tl, { kind: "text", content: delta, streaming: true }];
+                  return [
+                    ...tl,
+                    { kind: "text", content: delta, streaming: true },
+                  ];
                 });
                 break;
               }
               case "TEXT_MESSAGE_END": {
                 updateTimeline((tl) =>
-                  tl.map((e) => (e.kind === "text" && e.streaming ? { ...e, streaming: false } : e)),
+                  tl.map((e) =>
+                    e.kind === "text" && e.streaming
+                      ? { ...e, streaming: false }
+                      : e,
+                  ),
                 );
                 break;
               }
@@ -705,13 +849,26 @@ export function AgentChat({
               case "RUN_ERROR": {
                 const errMsg = (evt.message ?? "Unknown error") as string;
                 updateStreaming((s) => ({ ...s, status: "error" }));
-                updateTimeline((tl) => [...tl, { kind: "text", content: `Error: ${errMsg}`, streaming: false }]);
+                updateTimeline((tl) => [
+                  ...tl,
+                  {
+                    kind: "text",
+                    content: `Error: ${errMsg}`,
+                    streaming: false,
+                  },
+                ]);
                 break;
               }
               case "CUSTOM": {
                 const evtName = evt.name as string | undefined;
-                const evtValue = evt.value as Record<string, unknown> | undefined;
-                if (evtName === "injected_context" && evtValue && Array.isArray(evtValue.items)) {
+                const evtValue = evt.value as
+                  | Record<string, unknown>
+                  | undefined;
+                if (
+                  evtName === "injected_context" &&
+                  evtValue &&
+                  Array.isArray(evtValue.items)
+                ) {
                   updateStreaming((s) => ({
                     ...s,
                     injectedContext: evtValue.items as InjectedContextItem[],
@@ -747,7 +904,14 @@ export function AgentChat({
         return {
           ...prev,
           status: "error",
-          timeline: [...prev.timeline, { kind: "text", content: "Error: connection failed", streaming: false }],
+          timeline: [
+            ...prev.timeline,
+            {
+              kind: "text",
+              content: "Error: connection failed",
+              streaming: false,
+            },
+          ],
         };
       });
     }
@@ -794,7 +958,11 @@ export function AgentChat({
 
   async function submitAskAnswer(answers: Record<string, string | string[]>) {
     if (!currentSessionId) return;
-    const body: ChatAnswerBody = { sessionId: currentSessionId, notebookId, answers };
+    const body: ChatAnswerBody = {
+      sessionId: currentSessionId,
+      notebookId,
+      answers,
+    };
     try {
       await fetch("/api/chat/answer", {
         method: "POST",
@@ -810,7 +978,9 @@ export function AgentChat({
         ...prev,
         status: "thinking",
         timeline: prev.timeline.map((e) =>
-          e.kind === "ask" && !e.resolved ? { ...e, answers, resolved: true } : e,
+          e.kind === "ask" && !e.resolved
+            ? { ...e, answers, resolved: true }
+            : e,
         ),
       };
     });
@@ -839,7 +1009,10 @@ export function AgentChat({
   }
 
   /* ── Build render list from active path + optional streaming ── */
-  const renderNodes: Array<{ node: ChatNode; isStreaming: false } | { streaming: StreamingAssistant; isStreaming: true }> = [];
+  const renderNodes: Array<
+    | { node: ChatNode; isStreaming: false }
+    | { streaming: StreamingAssistant; isStreaming: true }
+  > = [];
   for (const node of activePath) {
     renderNodes.push({ node, isStreaming: false });
   }
@@ -849,7 +1022,8 @@ export function AgentChat({
 
   /* ── Detect pending ask from streaming timeline ────────── */
   const pendingAsk = useMemo(() => {
-    if (!streamingAssistant || streamingAssistant.status !== "waiting") return null;
+    if (!streamingAssistant || streamingAssistant.status !== "waiting")
+      return null;
     const askEntry = streamingAssistant.timeline.find(
       (e): e is AskEntry => e.kind === "ask" && !e.resolved,
     );
@@ -858,20 +1032,42 @@ export function AgentChat({
 
   /* ── Render ───────────────────────────────────────────── */
   return (
-    <div ref={setNodeRef} className="flex flex-col flex-1 overflow-hidden relative">
+    <div
+      ref={setNodeRef}
+      className="flex flex-col flex-1 overflow-hidden relative"
+    >
       {/* Toolbar */}
       <div className="h-10 border-b border-base-300 flex items-center px-3 shrink-0">
-        <button type="button" className="btn btn-ghost btn-xs gap-1 font-normal" onClick={onOpenModelSelector}>
-          <span className="truncate max-w-[120px]">{modelConfig.model.name}</span>
-          <span className="badge badge-xs badge-outline">{modelConfig.model.provider}</span>
+        <button
+          type="button"
+          className="btn btn-ghost btn-xs gap-1 font-normal"
+          onClick={onOpenModelSelector}
+        >
+          <span className="truncate max-w-[120px]">
+            {modelConfig.model.name}
+          </span>
+          <span className="badge badge-xs badge-outline">
+            {modelConfig.model.provider}
+          </span>
           <CaretDown size={12} />
         </button>
         <div className="ml-auto flex items-center gap-1">
-          <button type="button" className="btn btn-ghost btn-xs gap-1 font-normal" onClick={onOpenSessionSelector}>
-            <span className="truncate max-w-[140px]">{currentSession?.name ?? "New Chat"}</span>
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs gap-1 font-normal"
+            onClick={onOpenSessionSelector}
+          >
+            <span className="truncate max-w-[140px]">
+              {currentSession?.name ?? "New Chat"}
+            </span>
             <CaretDown size={12} />
           </button>
-          <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={handleNewChat} title="New Chat">
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs btn-square"
+            onClick={handleNewChat}
+            title="New Chat"
+          >
             <Plus size={14} />
           </button>
         </div>
@@ -923,160 +1119,169 @@ export function AgentChat({
       {/* Drop overlay */}
       {isOver && (
         <div className="absolute inset-0 bg-primary/10 border-2 border-dashed border-primary rounded-lg flex items-center justify-center pointer-events-none z-10">
-          <span className="text-primary font-medium text-sm">拖放笔记以引用</span>
+          <span className="text-primary font-medium text-sm">
+            拖放笔记以引用
+          </span>
         </div>
       )}
 
       {/* Input Area */}
       {pendingAsk ? (
-        <AskInputPanel
-          entry={pendingAsk}
-          onSubmitAnswer={submitAskAnswer}
-        />
+        <AskInputPanel entry={pendingAsk} onSubmitAnswer={submitAskAnswer} />
       ) : (
-      <div className="border-t border-base-300 shrink-0">
-        {/* Toolbar row */}
-        <div className="flex items-center gap-1.5 px-3 pt-2 pb-2">
-          {/* Attach notes */}
-          <div className="relative">
+        <div className="border-t border-base-300 shrink-0">
+          {/* Toolbar row */}
+          <div className="flex items-center gap-1.5 px-3 pt-2 pb-2">
+            {/* Attach notes */}
+            <div className="relative">
+              <button
+                type="button"
+                className={`btn btn-ghost btn-sm gap-1 ${attachedNoteIds.size > 0 ? "text-primary" : "text-base-content/40"}`}
+                onClick={() => setShowAttachPopover((v) => !v)}
+                title="附加笔记"
+              >
+                <Paperclip size={18} />
+                {attachedNoteIds.size > 0 && (
+                  <span className="badge badge-sm badge-primary">
+                    {attachedNoteIds.size}
+                  </span>
+                )}
+              </button>
+              {showAttachPopover && (
+                <div className="absolute bottom-full left-0 mb-1 w-64 bg-base-200 rounded-box shadow-lg border border-base-300 z-20 p-2 max-h-48 overflow-y-auto">
+                  {attachedNoteIds.size === 0 ? (
+                    <div className="text-xs text-base-content/40 text-center py-2">
+                      拖拽笔记到聊天区域以附加
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      {[...attachedNoteIds].map((noteId) => {
+                        const note = notesList.find((n) => n.id === noteId);
+                        return (
+                          <div
+                            key={noteId}
+                            className="flex items-center gap-2 text-sm px-2 py-1.5 rounded hover:bg-base-300"
+                          >
+                            <Files size={14} className="shrink-0" />
+                            <span className="truncate flex-1">
+                              {note?.name ?? noteId}
+                            </span>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm btn-circle"
+                              onClick={() =>
+                                setAttachedNoteIds((prev) => {
+                                  const next = new Set(prev);
+                                  next.delete(noteId);
+                                  return next;
+                                })
+                              }
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Upload from chat */}
             <button
               type="button"
-              className={`btn btn-ghost btn-sm gap-1 ${attachedNoteIds.size > 0 ? "text-primary" : "text-base-content/40"}`}
-              onClick={() => setShowAttachPopover((v) => !v)}
-              title="附加笔记"
+              className="btn btn-ghost btn-sm text-base-content/40"
+              onClick={() => chatFileInputRef.current?.click()}
+              disabled={isChatUploading}
+              title="上传文件并附加"
             >
-              <Paperclip size={18} />
-              {attachedNoteIds.size > 0 && (
-                <span className="badge badge-sm badge-primary">{attachedNoteIds.size}</span>
+              {isChatUploading ? (
+                <span className="loading loading-spinner loading-sm" />
+              ) : (
+                <UploadSimple size={18} />
               )}
             </button>
-            {showAttachPopover && (
-              <div className="absolute bottom-full left-0 mb-1 w-64 bg-base-200 rounded-box shadow-lg border border-base-300 z-20 p-2 max-h-48 overflow-y-auto">
-                {attachedNoteIds.size === 0 ? (
-                  <div className="text-xs text-base-content/40 text-center py-2">
-                    拖拽笔记到聊天区域以附加
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-1">
-                    {[...attachedNoteIds].map((noteId) => {
-                      const note = notesList.find((n) => n.id === noteId);
-                      return (
-                        <div
-                          key={noteId}
-                          className="flex items-center gap-2 text-sm px-2 py-1.5 rounded hover:bg-base-300"
-                        >
-                          <Files size={14} className="shrink-0" />
-                          <span className="truncate flex-1">{note?.name ?? noteId}</span>
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-sm btn-circle"
-                            onClick={() =>
-                              setAttachedNoteIds((prev) => {
-                                const next = new Set(prev);
-                                next.delete(noteId);
-                                return next;
-                              })
-                            }
-                          >
-                            <X size={12} />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+            <input
+              ref={chatFileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              accept="text/*,.md,.txt,.csv,.json,.xml,.html,.htm,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.sh,.bash,.zsh,.py,.js,.ts,.jsx,.tsx,.css,.scss,.less,.sql,.r,.rs,.go,.java,.c,.cpp,.h,.hpp,.rb,.php,.swift,.kt,.scala,.lua,.pl,.tex,.bib,.org,.rst,.adoc,.nix"
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  handleChatUpload(e.target.files);
+                }
+              }}
+            />
 
-          {/* Upload from chat */}
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm text-base-content/40"
-            onClick={() => chatFileInputRef.current?.click()}
-            disabled={isChatUploading}
-            title="上传文件并附加"
-          >
-            {isChatUploading ? (
-              <span className="loading loading-spinner loading-sm" />
-            ) : (
-              <UploadSimple size={18} />
-            )}
-          </button>
-          <input
-            ref={chatFileInputRef}
-            type="file"
-            className="hidden"
-            multiple
-            accept="text/*,.md,.txt,.csv,.json,.xml,.html,.htm,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.sh,.bash,.zsh,.py,.js,.ts,.jsx,.tsx,.css,.scss,.less,.sql,.r,.rs,.go,.java,.c,.cpp,.h,.hpp,.rb,.php,.swift,.kt,.scala,.lua,.pl,.tex,.bib,.org,.rst,.adoc,.nix"
-            onChange={(e) => {
-              if (e.target.files && e.target.files.length > 0) {
-                handleChatUpload(e.target.files);
+            {/* Spacer */}
+            <div className="flex-1" />
+
+            {/* Compress conversation - right aligned */}
+            <select
+              className="select select-sm select-ghost text-base-content/40 w-auto"
+              value={compressMode}
+              onChange={(e) =>
+                updateCompressMode(e.target.value as "native" | "soft")
               }
-            }}
-          />
-
-          {/* Spacer */}
-          <div className="flex-1" />
-
-          {/* Compress conversation - right aligned */}
-          <select
-            className="select select-sm select-ghost text-base-content/40 w-auto"
-            value={compressMode}
-            onChange={(e) => updateCompressMode(e.target.value as "native" | "soft")}
-          >
-            <option value="native">原生压缩</option>
-            <option value="soft">软压缩</option>
-          </select>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm text-base-content/40"
-            disabled={!currentSessionId || isCompressing}
-            onClick={() => handleCompress()}
-            title="压缩对话"
-          >
-            {isCompressing ? (
-              <span className="loading loading-spinner loading-sm" />
-            ) : (
-              <ArrowsInSimple size={18} />
-            )}
-          </button>
-        </div>
-
-        {/* Textarea */}
-        <div className="relative px-3 pb-3">
-          <textarea
-            autoFocus
-            ref={textareaRef}
-            className="textarea textarea-bordered w-full pr-12 resize-none rounded-xl"
-            rows={1}
-            style={{ maxHeight: "6rem" }}
-            placeholder="输入消息..."
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onInput={(e) => {
-              const target = e.target as HTMLTextAreaElement;
-              target.style.height = "auto";
-              target.style.height = `${Math.min(target.scrollHeight, 96)}px`;
-            }}
-          />
-          {isStreaming ? (
-            <button type="button" className="btn btn-error btn-sm absolute bottom-5 right-5" onClick={stopStreaming}>
-              <Stop size={16} weight="bold" />
-            </button>
-          ) : (
+            >
+              <option value="native">原生压缩</option>
+              <option value="soft">软压缩</option>
+            </select>
             <button
               type="button"
-              className="btn btn-primary btn-sm absolute bottom-5 right-5"
-              onClick={() => sendMessage()}
-              disabled={!input.trim() && attachedNoteIds.size === 0}
+              className="btn btn-ghost btn-sm text-base-content/40"
+              disabled={!currentSessionId || isCompressing}
+              onClick={() => handleCompress()}
+              title="压缩对话"
             >
-              <PaperPlaneRight size={16} weight="bold" />
+              {isCompressing ? (
+                <span className="loading loading-spinner loading-sm" />
+              ) : (
+                <ArrowsInSimple size={18} />
+              )}
             </button>
-          )}
+          </div>
+
+          {/* Textarea */}
+          <div className="relative px-3 pb-3">
+            <textarea
+              autoFocus
+              ref={textareaRef}
+              className="textarea textarea-bordered w-full pr-12 resize-none rounded-xl"
+              rows={1}
+              style={{ maxHeight: "6rem" }}
+              placeholder="输入消息..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onInput={(e) => {
+                const target = e.target as HTMLTextAreaElement;
+                target.style.height = "auto";
+                target.style.height = `${Math.min(target.scrollHeight, 96)}px`;
+              }}
+            />
+            {isStreaming ? (
+              <button
+                type="button"
+                className="btn btn-error btn-sm absolute bottom-5 right-5"
+                onClick={stopStreaming}
+              >
+                <Stop size={16} weight="bold" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm absolute bottom-5 right-5"
+                onClick={() => sendMessage()}
+                disabled={!input.trim() && attachedNoteIds.size === 0}
+              >
+                <PaperPlaneRight size={16} weight="bold" />
+              </button>
+            )}
+          </div>
         </div>
-      </div>
       )}
     </div>
   );
@@ -1178,10 +1383,18 @@ function UserBubble({
             autoFocus
           />
           <div className="flex justify-end gap-1">
-            <button type="button" className="btn btn-ghost btn-xs" onClick={handleCancelEdit}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-xs"
+              onClick={handleCancelEdit}
+            >
               <X size={14} /> Cancel
             </button>
-            <button type="button" className="btn btn-primary btn-xs" onClick={handleSubmitEdit}>
+            <button
+              type="button"
+              className="btn btn-primary btn-xs"
+              onClick={handleSubmitEdit}
+            >
               <Check size={14} /> Send
             </button>
           </div>
@@ -1190,10 +1403,19 @@ function UserBubble({
     );
   }
 
+  const hasAttached = node.attachedFiles && node.attachedFiles.length > 0;
+
   return (
     <div className="flex flex-col items-end gap-0.5">
       {/* Version navigator above the bubble */}
-      <VersionNavigator nodeId={node.id} allNodes={allNodes} onNavigate={onNavigate} />
+      <VersionNavigator
+        nodeId={node.id}
+        allNodes={allNodes}
+        onNavigate={onNavigate}
+      />
+
+      {/* Attached files badge */}
+      {hasAttached && <AttachedFilesBadge files={node.attachedFiles!} />}
 
       {/* Bubble */}
       <div className="bg-primary text-primary-content rounded-2xl rounded-br-md px-4 py-2 max-w-[75%] text-sm whitespace-pre-wrap">
@@ -1202,7 +1424,12 @@ function UserBubble({
 
       {/* Inline action buttons below */}
       <div className="flex items-center gap-0.5">
-        <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={handleCopy} title="Copy">
+        <button
+          type="button"
+          className="btn btn-ghost btn-xs btn-square"
+          onClick={handleCopy}
+          title="Copy"
+        >
           {copied ? <Check size={12} /> : <Copy size={12} />}
         </button>
         <button
@@ -1216,10 +1443,50 @@ function UserBubble({
         >
           <PencilSimple size={12} />
         </button>
-        <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={() => onRetry(node.id)} title="Retry">
+        <button
+          type="button"
+          className="btn btn-ghost btn-xs btn-square"
+          onClick={() => onRetry(node.id)}
+          title="Retry"
+        >
           <ArrowCounterClockwise size={12} />
         </button>
       </div>
+    </div>
+  );
+}
+
+/* ── Attached files collapsible badge ────────────────────── */
+
+function AttachedFilesBadge({ files }: { files: AttachedFile[] }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="flex flex-col items-end gap-0.5 max-w-[75%]">
+      <button
+        type="button"
+        className="flex items-center gap-1.5 text-[11px] text-primary-content/70 bg-primary/20 rounded-full px-2.5 py-0.5 hover:bg-primary/30 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <Files size={13} weight="duotone" />
+        <span>文件引用 ({files.length})</span>
+        <CaretDown
+          size={10}
+          className={`transition-transform ${expanded ? "rotate-180" : ""}`}
+        />
+      </button>
+      {expanded && (
+        <div className="bg-base-200 rounded-lg border border-base-300 p-2 w-full">
+          {files.map((f) => (
+            <div
+              key={f.id}
+              className="flex items-center gap-1.5 text-[11px] text-base-content/60 py-0.5"
+            >
+              <Files size={12} className="shrink-0" />
+              <span className="truncate">{f.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1234,7 +1501,10 @@ function AssistantBlock({
   notebookId: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const hasTimelineEvents = node.timeline.some((t) => t.kind === "thinking" || t.kind === "tool_call" || t.kind === "ai_search");
+  const hasTimelineEvents = node.timeline.some(
+    (t) =>
+      t.kind === "thinking" || t.kind === "tool_call" || t.kind === "ai_search",
+  );
   const createNoteMut = trpc.notes.createNote.useMutation();
   const updateNoteMut = trpc.notes.updateNote.useMutation();
   const utils = trpc.useUtils();
@@ -1246,28 +1516,37 @@ function AssistantBlock({
   }
 
   async function handleAddAsFile() {
-    const name = node.content.slice(0, 40).replace(/[^a-zA-Z0-9\u4e00-\u9fff\s-]/g, "").trim() || "untitled";
-    const { id } = await createNoteMut.mutateAsync({ notebookId, categoryId: null, name });
+    const name =
+      node.content
+        .slice(0, 40)
+        .replace(/[^a-zA-Z0-9\u4e00-\u9fff\s-]/g, "")
+        .trim() || "untitled";
+    const { id } = await createNoteMut.mutateAsync({
+      notebookId,
+      categoryId: null,
+      name,
+    });
     await updateNoteMut.mutateAsync({ id, content: node.content });
     await utils.notes.listNotes.invalidate();
   }
 
   /* Compute elapsed from timeline */
-  const elapsed = node.timeline.length > 0
-    ? Math.max(1, Math.round((Date.now() - node.createdAt) / 1000))
-    : 0;
+  const elapsed =
+    node.timeline.length > 0
+      ? Math.max(1, Math.round((Date.now() - node.createdAt) / 1000))
+      : 0;
 
   const timelineSteps = node.timeline.filter((e) => e.kind !== "text");
-  const textEntries = node.timeline.filter((e): e is TextEntry => e.kind === "text");
+  const textEntries = node.timeline.filter(
+    (e): e is TextEntry => e.kind === "text",
+  );
 
   return (
     <div className="flex flex-col gap-0.5">
       {node.injectedContext && node.injectedContext.length > 0 && (
         <ContextBanner items={node.injectedContext} />
       )}
-      {timelineSteps.length > 0 && (
-        <TimelineTrack entries={timelineSteps} />
-      )}
+      {timelineSteps.length > 0 && <TimelineTrack entries={timelineSteps} />}
 
       {textEntries.map((entry, i) => (
         <TextNode key={i} entry={entry} />
@@ -1280,10 +1559,20 @@ function AssistantBlock({
         {node.status === "error" && <StatusBadge status="error" />}
 
         <div className="flex items-center gap-0.5">
-          <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={handleCopy} title="Copy">
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs btn-square"
+            onClick={handleCopy}
+            title="Copy"
+          >
             {copied ? <Check size={12} /> : <Copy size={12} />}
           </button>
-          <button type="button" className="btn btn-ghost btn-xs btn-square" onClick={handleAddAsFile} title="Add as file">
+          <button
+            type="button"
+            className="btn btn-ghost btn-xs btn-square"
+            onClick={handleAddAsFile}
+            title="Add as file"
+          >
             <FilePlus size={12} />
           </button>
         </div>
@@ -1302,7 +1591,9 @@ function StreamingAssistantBlock({
   onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
 }) {
   const timelineSteps = assistant.timeline.filter((e) => e.kind !== "text");
-  const textEntries = assistant.timeline.filter((e): e is TextEntry => e.kind === "text");
+  const textEntries = assistant.timeline.filter(
+    (e): e is TextEntry => e.kind === "text",
+  );
 
   return (
     <div className="flex flex-col gap-0.5">
@@ -1310,7 +1601,11 @@ function StreamingAssistantBlock({
         <ContextBanner items={assistant.injectedContext} />
       )}
       {timelineSteps.length > 0 && (
-        <TimelineTrack entries={timelineSteps} streamingStatus={assistant.status} onSubmitAnswer={onSubmitAnswer} />
+        <TimelineTrack
+          entries={timelineSteps}
+          streamingStatus={assistant.status}
+          onSubmitAnswer={onSubmitAnswer}
+        />
       )}
 
       {textEntries.map((entry, i) => (
@@ -1320,7 +1615,10 @@ function StreamingAssistantBlock({
       <div className="flex items-center gap-2 text-[10px] text-base-content/30">
         <span>{assistant.modelName}</span>
         <StatusBadge status={assistant.status} />
-        <ElapsedTimer startTime={assistant.startTime} running={assistant.status !== "done" && assistant.status !== "error"} />
+        <ElapsedTimer
+          startTime={assistant.startTime}
+          running={assistant.status !== "done" && assistant.status !== "error"}
+        />
       </div>
     </div>
   );
@@ -1339,15 +1637,23 @@ function ContextBanner({ items }: { items: InjectedContextItem[] }) {
       >
         <Files size={13} weight="duotone" />
         <span>参考了 {items.length} 篇笔记</span>
-        <CaretDown size={10} className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
+        <CaretDown
+          size={10}
+          className={`transition-transform ${expanded ? "rotate-180" : ""}`}
+        />
       </button>
       {expanded && (
         <div className="pl-5 flex flex-col gap-0.5">
           {items.map((item) => (
-            <div key={item.name} className="flex items-center gap-1 text-[10px] text-base-content/40">
+            <div
+              key={item.name}
+              className="flex items-center gap-1 text-[10px] text-base-content/40"
+            >
               <span className="truncate max-w-[200px]">{item.name}</span>
               {item.snippet && (
-                <span className="truncate max-w-[300px] italic">{item.snippet}</span>
+                <span className="truncate max-w-[300px] italic">
+                  {item.snippet}
+                </span>
               )}
             </div>
           ))}
@@ -1370,7 +1676,10 @@ function TimelineTrack({
 }) {
   // Group consecutive tool_call entries with the same name
   const grouped = useMemo(() => {
-    const result: (TimelineEntry | { kind: "tool_call_group"; name: string; calls: ToolCallEntry[] })[] = [];
+    const result: (
+      | TimelineEntry
+      | { kind: "tool_call_group"; name: string; calls: ToolCallEntry[] }
+    )[] = [];
     let i = 0;
     while (i < entries.length) {
       const entry = entries[i];
@@ -1386,7 +1695,10 @@ function TimelineTrack({
         const groupEnd = i;
         if (groupEnd > groupStart) {
           // 2+ consecutive same-name tool calls → group
-          const calls = entries.slice(groupStart, groupEnd + 1) as ToolCallEntry[];
+          const calls = entries.slice(
+            groupStart,
+            groupEnd + 1,
+          ) as ToolCallEntry[];
           result.push({ kind: "tool_call_group", name: entry.name, calls });
         } else {
           result.push(entry);
@@ -1405,17 +1717,23 @@ function TimelineTrack({
       <div className="absolute left-[7px] top-3 bottom-3 w-px bg-base-content/10" />
 
       <div className="flex flex-col gap-0.5">
-        {grouped.map((entry, i) => (
-          entry.kind === "tool_call_group"
-            ? <ToolCallGroupStep key={i} group={entry} isLast={i === grouped.length - 1} />
-            : <TimelineStep
-                key={i}
-                entry={entry}
-                isLast={i === grouped.length - 1}
-                streamingStatus={streamingStatus}
-                onSubmitAnswer={onSubmitAnswer}
-              />
-        ))}
+        {grouped.map((entry, i) =>
+          entry.kind === "tool_call_group" ? (
+            <ToolCallGroupStep
+              key={i}
+              group={entry}
+              isLast={i === grouped.length - 1}
+            />
+          ) : (
+            <TimelineStep
+              key={i}
+              entry={entry}
+              isLast={i === grouped.length - 1}
+              streamingStatus={streamingStatus}
+              onSubmitAnswer={onSubmitAnswer}
+            />
+          ),
+        )}
       </div>
     </div>
   );
@@ -1445,7 +1763,11 @@ function TimelineStep({
 
       {/* Content */}
       <div className="flex-1 min-w-0">
-        <TimelineStepContent entry={entry} streamingStatus={streamingStatus} onSubmitAnswer={onSubmitAnswer} />
+        <TimelineStepContent
+          entry={entry}
+          streamingStatus={streamingStatus}
+          onSubmitAnswer={onSubmitAnswer}
+        />
       </div>
     </div>
   );
@@ -1465,9 +1787,11 @@ function ToolCallGroupStep({
   const totalCount = group.calls.length;
   const allDone = runningCount === 0;
 
-  const dotIcon = allDone
-    ? <Wrench size={11} className="text-base-content/30" />
-    : <GearSix size={11} className="text-info/70 animate-spin" />;
+  const dotIcon = allDone ? (
+    <Wrench size={11} className="text-base-content/30" />
+  ) : (
+    <GearSix size={11} className="text-info/70 animate-spin" />
+  );
 
   return (
     <div className="relative flex items-start gap-2 min-h-[20px]">
@@ -1486,15 +1810,26 @@ function ToolCallGroupStep({
           >
             <span className="font-mono">{group.name}</span>
             <span className="text-base-content/30">
-              ({allDone ? `${totalCount}` : `${runningCount}运行中/${totalCount}`})
+              (
+              {allDone
+                ? `${totalCount}`
+                : `${runningCount}运行中/${totalCount}`}
+              )
             </span>
             {!allDone && <span className="loading loading-dots loading-xs" />}
-            <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
+            <CaretRight
+              size={10}
+              className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`}
+            />
           </button>
           {open && (
             <div className="text-xs mt-1 space-y-2 max-h-60 overflow-y-auto">
               {group.calls.map((call, i) => (
-                <ToolCallGroupItem key={call.toolCallId || i} entry={call} index={i} />
+                <ToolCallGroupItem
+                  key={call.toolCallId || i}
+                  entry={call}
+                  index={i}
+                />
               ))}
             </div>
           )}
@@ -1504,7 +1839,13 @@ function ToolCallGroupStep({
   );
 }
 
-function ToolCallGroupItem({ entry, index }: { entry: ToolCallEntry; index: number }) {
+function ToolCallGroupItem({
+  entry,
+  index,
+}: {
+  entry: ToolCallEntry;
+  index: number;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <div className="border-l border-base-content/10 pl-2">
@@ -1513,10 +1854,15 @@ function ToolCallGroupItem({ entry, index }: { entry: ToolCallEntry; index: numb
         className="text-[11px] text-base-content/40 hover:text-base-content/60 flex items-center gap-1"
         onClick={() => setOpen(!open)}
       >
-        <span className="text-base-content/30 truncate max-w-[200px]">{toolCallSummary(entry) || `#${index + 1}`}</span>
+        <span className="text-base-content/30 truncate max-w-[200px]">
+          {toolCallSummary(entry) || `#${index + 1}`}
+        </span>
         {!entry.done && <span className="loading loading-dots loading-xs" />}
         {entry.done && <Check size={9} className="text-success/50" />}
-        <CaretRight size={9} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
+        <CaretRight
+          size={9}
+          className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`}
+        />
       </button>
       {open && (
         <div className="text-xs mt-1 space-y-1 max-h-40 overflow-y-auto">
@@ -1537,13 +1883,27 @@ function ToolCallGroupItem({ entry, index }: { entry: ToolCallEntry; index: numb
 function timelineDotIcon(entry: TimelineEntry) {
   switch (entry.kind) {
     case "thinking":
-      return <Brain size={11} weight={entry.done ? "regular" : "fill"} className={entry.done ? "text-base-content/30" : "text-base-content/50 animate-pulse"} />;
+      return (
+        <Brain
+          size={11}
+          weight={entry.done ? "regular" : "fill"}
+          className={
+            entry.done
+              ? "text-base-content/30"
+              : "text-base-content/50 animate-pulse"
+          }
+        />
+      );
     case "tool_call":
-      return entry.done
-        ? <Wrench size={11} className="text-base-content/30" />
-        : <GearSix size={11} className="text-info/70 animate-spin" />;
+      return entry.done ? (
+        <Wrench size={11} className="text-base-content/30" />
+      ) : (
+        <GearSix size={11} className="text-info/70 animate-spin" />
+      );
     case "ai_search":
-      return <MagnifyingGlass size={11} weight="duotone" className="text-info/60" />;
+      return (
+        <MagnifyingGlass size={11} weight="duotone" className="text-info/60" />
+      );
     case "reply":
       return <ChatText size={11} className="text-base-content/30" />;
     case "ask":
@@ -1572,11 +1932,21 @@ function TimelineStepContent({
     case "ai_search":
       return <AiSearchContent entry={entry} />;
     case "reply":
-      return <span className="text-xs text-base-content/60 leading-relaxed">{entry.message}</span>;
+      return (
+        <span className="text-xs text-base-content/60 leading-relaxed">
+          {entry.message}
+        </span>
+      );
     case "ask":
-      return <AskContent entry={entry} isWaiting={streamingStatus === "waiting"} />;
+      return (
+        <AskContent entry={entry} isWaiting={streamingStatus === "waiting"} />
+      );
     case "finish":
-      return <span className="text-xs text-success leading-relaxed">{entry.message}</span>;
+      return (
+        <span className="text-xs text-success leading-relaxed">
+          {entry.message}
+        </span>
+      );
     default:
       return null;
   }
@@ -1594,7 +1964,10 @@ function ThinkingContent({ entry }: { entry: ThinkingEntry }) {
   return (
     <details ref={detailsRef} open={!entry.done}>
       <summary className="text-xs text-base-content/40 hover:text-base-content/60 cursor-pointer select-none list-none flex items-center gap-1 [&::-webkit-details-marker]:hidden leading-relaxed">
-        <CaretRight size={10} className="transition-transform [[open]>&]:rotate-90 shrink-0" />
+        <CaretRight
+          size={10}
+          className="transition-transform [[open]>&]:rotate-90 shrink-0"
+        />
         <span>{entry.done ? "思考完成" : "思考中…"}</span>
       </summary>
       <div className="text-xs text-base-content/30 mt-1 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed">
@@ -1617,9 +1990,16 @@ function ToolCallContent({ entry }: { entry: ToolCallEntry }) {
         onClick={() => setOpen(!open)}
       >
         <span className="font-mono">{entry.name}</span>
-        {toolCallSummary(entry) && <span className="text-base-content/30 truncate max-w-[200px]">{toolCallSummary(entry)}</span>}
+        {toolCallSummary(entry) && (
+          <span className="text-base-content/30 truncate max-w-[200px]">
+            {toolCallSummary(entry)}
+          </span>
+        )}
         {!entry.done && <span className="loading loading-dots loading-xs" />}
-        <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
+        <CaretRight
+          size={10}
+          className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`}
+        />
       </button>
       {open && (
         <div className="text-xs mt-1 space-y-1 max-h-40 overflow-y-auto">
@@ -1651,10 +2031,17 @@ function AiSearchContent({ entry }: { entry: AiSearchEntry }) {
         onClick={() => setOpen(!open)}
       >
         <span className="font-mono">自动AI检索</span>
-        {entry.round > 1 && <span className="text-[10px] text-base-content/30">第{entry.round}轮</span>}
+        {entry.round > 1 && (
+          <span className="text-[10px] text-base-content/30">
+            第{entry.round}轮
+          </span>
+        )}
         <span className="text-base-content/30">·</span>
         <span>{fileCount} 个文件</span>
-        <CaretRight size={10} className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`} />
+        <CaretRight
+          size={10}
+          className={`transition-transform shrink-0 ${open ? "rotate-90" : ""}`}
+        />
       </button>
       {open && (
         <div className="text-xs mt-1.5 space-y-1.5 max-h-60 overflow-y-auto">
@@ -1665,10 +2052,15 @@ function AiSearchContent({ entry }: { entry: AiSearchEntry }) {
           </div>
           {/* Result files */}
           {entry.results.map((item, i) => (
-            <div key={`${item.fileId}-${i}`} className="bg-base-200 rounded p-2">
+            <div
+              key={`${item.fileId}-${i}`}
+              className="bg-base-200 rounded p-2"
+            >
               <div className="flex items-center gap-1.5 text-base-content/60 mb-0.5">
                 <Files size={10} weight="duotone" />
-                <span className="font-medium truncate max-w-[200px]">{item.filename}</span>
+                <span className="font-medium truncate max-w-[200px]">
+                  {item.filename}
+                </span>
                 <span className="text-[10px] text-base-content/30 ml-auto">
                   相关度 {(item.score * 100).toFixed(0)}%
                 </span>
@@ -1720,9 +2112,11 @@ function AskContent({
             <div className="flex flex-wrap gap-1">
               {(Array.isArray(entry.answers?.[q.id])
                 ? (entry.answers![q.id] as string[])
-                : [entry.answers?.[q.id]].filter(Boolean) as string[]
+                : ([entry.answers?.[q.id]].filter(Boolean) as string[])
               ).map((a) => (
-                <span key={a} className="badge badge-xs badge-primary">{a}</span>
+                <span key={a} className="badge badge-xs badge-primary">
+                  {a}
+                </span>
               ))}
             </div>
           </div>
@@ -1750,7 +2144,9 @@ function AskInputPanel({
   onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
 }) {
   const [activeTab, setActiveTab] = useState(0);
-  const [selections, setSelections] = useState<Record<string, string | string[]>>({});
+  const [selections, setSelections] = useState<
+    Record<string, string | string[]>
+  >({});
   const [freeText, setFreeText] = useState("");
   const questions = entry.questions;
   const singleQuestion = questions.length === 1;
@@ -1804,7 +2200,9 @@ function AskInputPanel({
     ? !!(freeText.trim() || selections[currentQ?.id])
     : questions.every((q) => {
         const sel = selections[q.id];
-        return sel && (typeof sel === "string" ? sel.length > 0 : sel.length > 0);
+        return (
+          sel && (typeof sel === "string" ? sel.length > 0 : sel.length > 0)
+        );
       });
 
   return (
@@ -1832,11 +2230,15 @@ function AskInputPanel({
       {/* Current question + options */}
       {currentQ && (
         <div className="px-3 pt-2 pb-1">
-          <div className="text-sm font-medium text-base-content/80 mb-2">{currentQ.question}</div>
+          <div className="text-sm font-medium text-base-content/80 mb-2">
+            {currentQ.question}
+          </div>
           <div className="flex flex-wrap gap-1.5">
             {currentQ.options.map((opt) => {
               const selected = currentQ.multi
-                ? ((selections[currentQ.id] ?? []) as string[]).includes(opt.label)
+                ? ((selections[currentQ.id] ?? []) as string[]).includes(
+                    opt.label,
+                  )
                 : selections[currentQ.id] === opt.label;
 
               return (
@@ -1890,7 +2292,9 @@ function AskInputPanel({
           <button
             type="button"
             className="btn btn-ghost btn-sm"
-            onClick={() => setActiveTab((t) => Math.min(t + 1, questions.length - 1))}
+            onClick={() =>
+              setActiveTab((t) => Math.min(t + 1, questions.length - 1))
+            }
           >
             下一题
             <CaretRight size={14} />
@@ -1947,7 +2351,13 @@ function StatusBadge({ status }: { status: string }) {
 
 /* ── Elapsed timer ── */
 
-function ElapsedTimer({ startTime, running }: { startTime: number; running: boolean }) {
+function ElapsedTimer({
+  startTime,
+  running,
+}: {
+  startTime: number;
+  running: boolean;
+}) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -1966,11 +2376,7 @@ function ElapsedTimer({ startTime, running }: { startTime: number; running: bool
 
   if (elapsed === 0 && running) return null;
 
-  return (
-    <span className="text-[10px] text-base-content/30">
-      {elapsed}s
-    </span>
-  );
+  return <span className="text-[10px] text-base-content/30">{elapsed}s</span>;
 }
 
 /* ── Util ── */
@@ -1988,17 +2394,29 @@ function toolCallSummary(entry: ToolCallEntry): string {
         if (entry.result) {
           try {
             const res = JSON.parse(entry.result);
-            if (res.filename && res.filename !== "NOT_FOUND") label = res.filename;
+            if (res.filename && res.filename !== "NOT_FOUND")
+              label = res.filename;
           } catch {}
         }
         if (!label) label = (args.file_id ?? "").slice(0, 8);
-        const range = args.line_start && args.line_end ? ` L${args.line_start}-${args.line_end}` : args.line_start ? ` L${args.line_start}+` : "";
+        const range =
+          args.line_start && args.line_end
+            ? ` L${args.line_start}-${args.line_end}`
+            : args.line_start
+              ? ` L${args.line_start}+`
+              : "";
         return label + range;
       }
       case "edit_file":
-        return [args.new_filename, args.new_tag].filter(Boolean).join(" → ") || (args.file_id ?? "").slice(0, 8);
+        return (
+          [args.new_filename, args.new_tag].filter(Boolean).join(" → ") ||
+          (args.file_id ?? "").slice(0, 8)
+        );
       case "edit_content": {
-        const hunks = typeof args.diff === "string" ? (args.diff.match(/^@@/gm) ?? []).length : 0;
+        const hunks =
+          typeof args.diff === "string"
+            ? (args.diff.match(/^@@/gm) ?? []).length
+            : 0;
         return `${hunks} hunk${hunks !== 1 ? "s" : ""}`;
       }
       case "web_search":
@@ -2007,7 +2425,10 @@ function toolCallSummary(entry: ToolCallEntry): string {
         return args.url ? new URL(args.url).hostname : "";
       default: {
         // Generic: pick the first short string value
-        const vals = Object.values(args).filter((v): v is string => typeof v === "string" && v.length > 0 && v.length < 60);
+        const vals = Object.values(args).filter(
+          (v): v is string =>
+            typeof v === "string" && v.length > 0 && v.length < 60,
+        );
         return vals[0] ?? "";
       }
     }

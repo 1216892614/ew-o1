@@ -80,3 +80,12 @@
     display: none;
   }
 }
+
+/* Follow mode: highlight lines in read-only editor */
+.follow-highlight-line {
+  background-color: rgba(99, 102, 241, 0.08);
+}
+.dark .follow-highlight-line,
+[data-theme="dark"] .follow-highlight-line {
+  background-color: rgba(99, 102, 241, 0.12);
+}

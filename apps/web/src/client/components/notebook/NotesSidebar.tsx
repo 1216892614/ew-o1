@@ -64,6 +64,13 @@ function relativeTime(date: Date): string {
   return `${Math.floor(diffMonths / 12)}年前`;
 }
 
+function formatUploadCategoryName(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return `上传-${stamp}`;
+}
+
 function DraggableNoteItem({
   note,
   isSelected,
@@ -301,29 +308,43 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
 
   const handleUploadFiles = useCallback(
     async (fileList: FileList) => {
       if (fileList.length === 0) return;
+      const total = fileList.length;
       setIsUploading(true);
+      setUploadProgress({ done: 0, total });
       try {
-        const formData = new FormData();
-        formData.append("notebookId", notebookId);
-        for (const file of fileList) {
-          formData.append("files", file);
+        // Pre-create category if multi-file
+        let categoryId: string | null = null;
+        if (total > 1) {
+          const cat = await createCategory.mutateAsync({
+            notebookId,
+            name: formatUploadCategoryName(),
+          });
+          categoryId = cat.id;
         }
-        const response = await fetch("/api/upload", {
-          method: "POST",
-          body: formData,
-        });
-        if (!response.ok) {
-          const errorBody = await response.json().catch(() => null);
-          throw new Error(
-            (errorBody as { error?: string } | null)?.error ?? "上传失败",
-          );
+
+        for (let i = 0; i < total; i++) {
+          const formData = new FormData();
+          formData.append("notebookId", notebookId);
+          formData.append("files", fileList[i]);
+          if (categoryId) formData.append("categoryId", categoryId);
+          const response = await fetch("/api/upload", {
+            method: "POST",
+            body: formData,
+          });
+          if (!response.ok) {
+            const errorBody = await response.json().catch(() => null);
+            throw new Error(
+              (errorBody as { error?: string } | null)?.error ?? "上传失败",
+            );
+          }
+          setUploadProgress({ done: i + 1, total });
         }
-        const result = (await response.json()) as { uploaded: number };
-        toast.success(`已上传 ${result.uploaded} 个文件`);
+        toast.success(`已上传 ${total} 个文件`);
         utils.notes.listNotes.invalidate();
         utils.notes.listCategories.invalidate();
       } catch (error) {
@@ -332,12 +353,13 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
         );
       } finally {
         setIsUploading(false);
+        setUploadProgress({ done: 0, total: 0 });
         if (fileInputRef.current) {
           fileInputRef.current.value = "";
         }
       }
     },
-    [notebookId, utils],
+    [notebookId, utils, createCategory],
   );
 
   // Expand all categories on initial load
@@ -533,6 +555,15 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
     <div className="flex flex-col h-full bg-base-100">
       {/* Toolbar */}
       <div className="flex items-center gap-1 p-2 border-b border-base-300">
+        {/* Select all — leftmost */}
+        <button
+          className="btn btn-ghost btn-xs"
+          onClick={handleSelectAll}
+          title={allSelected ? "全反选" : "全选"}
+        >
+          {allSelected ? <CheckSquare size={14} /> : <Square size={14} />}
+        </button>
+
         {/* Add note */}
         <button
           className="btn btn-ghost btn-xs"
@@ -571,14 +602,12 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
           }}
         />
 
-        {/* Select all */}
-        <button
-          className="btn btn-ghost btn-xs"
-          onClick={handleSelectAll}
-          title={allSelected ? "全反选" : "全选"}
-        >
-          {allSelected ? <CheckSquare size={14} /> : <Square size={14} />}
-        </button>
+        {/* Upload progress */}
+        {isUploading && uploadProgress.total > 0 && (
+          <span className="text-xs text-base-content/60 tabular-nums">
+            {uploadProgress.done}/{uploadProgress.total}
+          </span>
+        )}
 
         {/* Batch actions when selected */}
         {selectedIds.size > 0 && (
@@ -601,7 +630,6 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
             </button>
           </>
         )}
-
 
         {/* Sort + Time Machine */}
         <div className="ml-auto flex items-center gap-0.5">

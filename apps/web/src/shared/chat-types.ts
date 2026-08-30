@@ -60,6 +60,14 @@ export type AiSearchEntry = {
 
 export type TimelineEntry = ThinkingEntry | ToolCallEntry | TextEntry | ReplyEntry | AskEntry | FinishEntry | AiSearchEntry;
 
+/* ── Attached files (files referenced in a user message) ── */
+
+export interface AttachedFile {
+  id: string;
+  name: string;
+  wordCount: number;
+}
+
 /* ── Injected context (notes fed to AI as system prompt) ── */
 
 export interface InjectedContextItem {
@@ -75,6 +83,7 @@ export interface UserNode {
   role: "user";
   parentId: string | null;
   content: string;
+  attachedFiles?: AttachedFile[];
   model: string;
   modelName: string;
   modelProvider: string;
@@ -120,7 +129,7 @@ export interface ChatRequestBody {
   modelProvider?: string;
   modelParams?: ModelParams;
   systemPrompt?: string;
-  activeNotes?: Array<{ name: string; id: string }>;
+  attachedFiles?: AttachedFile[];
 }
 
 /** GET /api/chat/messages response */

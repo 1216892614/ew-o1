@@ -48,7 +48,11 @@ uploadRoute.post("/api/upload", async (c) => {
   let categoryId: string | null = null;
   let categoryName = "";
 
-  if (files.length > 1) {
+  // Accept pre-created categoryId from client (for progress-tracked multi-file uploads)
+  const existingCategoryId = formData.get("categoryId");
+  if (typeof existingCategoryId === "string" && existingCategoryId) {
+    categoryId = existingCategoryId;
+  } else if (files.length > 1) {
     categoryId = nanoid();
     categoryName = formatUploadCategoryName();
     await database.insert(categories).values({

@@ -1,11 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAtom } from "jotai";
 import { useDroppable } from "@dnd-kit/core";
-import { NotePencil, FolderSimple, CaretDown, Plus, X, ArrowSquareOut, PencilSimple, Eye } from "@phosphor-icons/react";
-import Editor from "@monaco-editor/react";
+import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
+import {
+  ArrowSquareOut,
+  CaretDown,
+  Eye,
+  FolderSimple,
+  LinkBreak,
+  LinkSimple,
+  NotePencil,
+  PencilSimple,
+  Plus,
+  X,
+} from "@phosphor-icons/react";
+import { useAtom, useAtomValue } from "jotai";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import { trpc } from "@/client/lib/trpc";
-import { openedNoteIdsAtom, activeNoteIdAtom } from "./state";
+import {
+  activeNoteIdAtom,
+  followModeAtom,
+  lastToolFocusAtom,
+  openedNoteIdsAtom,
+  type ToolFocus,
+} from "./state";
 
 interface EditorPanelProps {
   notebookId: string;
@@ -14,6 +31,8 @@ interface EditorPanelProps {
 export function EditorPanel({ notebookId }: EditorPanelProps) {
   const [openedNoteIds, setOpenedNoteIds] = useAtom(openedNoteIdsAtom);
   const [activeNoteId, setActiveNoteId] = useAtom(activeNoteIdAtom);
+  const [followMode, setFollowMode] = useAtom(followModeAtom);
+  const lastToolFocus = useAtomValue(lastToolFocusAtom);
   const [theme, setTheme] = useState<"vs-dark" | "vs">("vs-dark");
   const [viewMode, setViewMode] = useState<"edit" | "preview">("edit");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -108,6 +127,68 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
       .filter(Boolean) as typeof notes;
   }, [openedNoteIds, notes]);
 
+  /* ── Follow mode: render agent-driven read-only view ──── */
+  if (followMode) {
+    return (
+      <div
+        ref={setNodeRef}
+        className={`flex h-full flex-col ${isOver ? "ring-2 ring-primary/30" : ""}`}
+      >
+        {/* Header bar with follow switch */}
+        <div className="flex h-10 items-center border-b border-base-300 px-3 gap-2">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <label className="swap swap-rotate" title="跟随模式">
+              <input
+                type="checkbox"
+                checked={followMode}
+                onChange={(e) => setFollowMode(e.target.checked)}
+              />
+              <LinkSimple size={14} className="swap-on text-primary" />
+              <LinkBreak size={14} className="swap-off text-base-content/40" />
+            </label>
+            <span className="text-xs text-primary font-medium">跟随</span>
+          </div>
+
+          {lastToolFocus && (
+            <>
+              <span className="text-base-content/20">|</span>
+              <span className="text-xs text-base-content/60 truncate">
+                {lastToolFocus.filename || lastToolFocus.fileId.slice(0, 8)}
+                {lastToolFocus.type === "read" &&
+                  lastToolFocus.lineStart != null && (
+                    <span className="text-base-content/40">
+                      {" "}
+                      L{lastToolFocus.lineStart}
+                      {lastToolFocus.lineEnd != null &&
+                        `-${lastToolFocus.lineEnd}`}
+                    </span>
+                  )}
+                {lastToolFocus.type === "edit" && (
+                  <span className="ml-1 badge badge-xs badge-outline badge-warning">
+                    diff
+                  </span>
+                )}
+              </span>
+            </>
+          )}
+        </div>
+
+        {/* Follow mode content */}
+        <div className="flex-1 overflow-hidden">
+          {lastToolFocus ? (
+            <FollowModeContent focus={lastToolFocus} theme={theme} />
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center gap-3 text-base-content/30">
+              <LinkSimple size={48} weight="thin" />
+              <span className="text-sm">等待 AI 工具调用...</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  /* ── Normal editing mode ──────────────────────────────── */
   return (
     <div
       ref={setNodeRef}
@@ -116,6 +197,19 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
       {/* Tab bar */}
       {tabs.length > 0 ? (
         <div className="flex h-10 items-center border-b border-base-300">
+          {/* Follow mode switch (left) */}
+          <div className="flex items-center gap-1 px-2 shrink-0 border-r border-base-300">
+            <label className="swap swap-rotate" title="跟随模式">
+              <input
+                type="checkbox"
+                checked={followMode}
+                onChange={(e) => setFollowMode(e.target.checked)}
+              />
+              <LinkSimple size={14} className="swap-on text-primary" />
+              <LinkBreak size={14} className="swap-off text-base-content/40" />
+            </label>
+          </div>
+
           <div className="flex items-center flex-1 min-w-0 overflow-x-auto scrollbar-none">
             {tabs.map((note) => (
               <button
@@ -181,9 +275,19 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
           </div>
         </div>
       ) : (
-        <div className="flex h-10 items-center border-b border-base-300 px-3">
+        <div className="flex h-10 items-center border-b border-base-300 px-3 gap-2">
+          {/* Follow mode switch even when no tabs */}
+          <label className="swap swap-rotate" title="跟随模式">
+            <input
+              type="checkbox"
+              checked={followMode}
+              onChange={(e) => setFollowMode(e.target.checked)}
+            />
+            <LinkSimple size={14} className="swap-on text-primary" />
+            <LinkBreak size={14} className="swap-off text-base-content/40" />
+          </label>
           <span className="text-sm text-base-content/50">
-            No file selected
+            选择一个笔记开始编辑
           </span>
         </div>
       )}
@@ -227,6 +331,149 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
   );
 }
 
+/* ── Follow mode content: read-only editor following tool calls ── */
+
+function FollowModeContent({
+  focus,
+  theme,
+}: {
+  focus: ToolFocus;
+  theme: "vs-dark" | "vs";
+}) {
+  type MonacoEditor = Parameters<OnMount>[0];
+  const editorRef = useRef<MonacoEditor | null>(null);
+
+  if (focus.type === "read") {
+    // Strip line number prefixes (e.g. "1: # Title\n2: content")
+    const rawContent = focus.content;
+    const lines = rawContent.split("\n");
+    const stripped = lines.map((line) => {
+      const m = line.match(/^\d+:\s?(.*)$/);
+      return m ? m[1] : line;
+    });
+    const displayContent = stripped.join("\n");
+
+    return (
+      <Editor
+        key={`follow-read-${focus.fileId}-${focus.lineStart ?? 0}`}
+        height="100%"
+        language="markdown"
+        theme={theme}
+        value={displayContent}
+        onMount={(editor) => {
+          editorRef.current = editor;
+
+          // Highlight the read range if specified
+          if (focus.lineStart != null) {
+            // Map focus lines to editor lines (content may be a slice)
+            const startLine = 1;
+            const endLine = stripped.length;
+
+            const _decorations = editor.createDecorationsCollection([
+              {
+                range: {
+                  startLineNumber: startLine,
+                  startColumn: 1,
+                  endLineNumber: endLine,
+                  endColumn: 1,
+                },
+                options: {
+                  isWholeLine: true,
+                  className: "follow-highlight-line",
+                  overviewRuler: {
+                    color: "#6366f1",
+                    position: 1, // OverviewRulerLane.Center
+                  },
+                },
+              },
+            ]);
+
+            // Scroll to the highlighted range
+            editor.revealLineInCenter(startLine);
+          }
+        }}
+        options={{
+          readOnly: true,
+          minimap: { enabled: false },
+          lineNumbers: (lineNumber: number) => {
+            // Show original line numbers when we know the start
+            if (focus.lineStart != null) {
+              return String(focus.lineStart + lineNumber - 1);
+            }
+            return String(lineNumber);
+          },
+          wordWrap: "on",
+          fontSize: 14,
+          padding: { top: 16 },
+          renderValidationDecorations: "off" as const,
+          scrollBeyondLastLine: false,
+          domReadOnly: true,
+        }}
+      />
+    );
+  }
+
+  // edit type: show diff
+  const { diff } = focus;
+
+  // Parse unified diff to extract original and modified content
+  const { original, modified } = parseDiffForDisplay(diff);
+
+  return (
+    <DiffEditor
+      key={`follow-edit-${focus.fileId}`}
+      height="100%"
+      language="markdown"
+      theme={theme}
+      original={original}
+      modified={modified}
+      options={{
+        readOnly: true,
+        minimap: { enabled: false },
+        wordWrap: "on",
+        fontSize: 14,
+        padding: { top: 16 },
+        renderSideBySide: false,
+        scrollBeyondLastLine: false,
+        domReadOnly: true,
+        originalEditable: false,
+      }}
+    />
+  );
+}
+
+/** Parse a unified diff hunk into original/modified text for DiffEditor */
+function parseDiffForDisplay(diff: string): {
+  original: string;
+  modified: string;
+} {
+  const lines = diff.split("\n");
+  const originalLines: string[] = [];
+  const modifiedLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+    } else if (line.startsWith("-")) {
+      originalLines.push(line.slice(1));
+    } else if (line.startsWith("+")) {
+      modifiedLines.push(line.slice(1));
+    } else if (line.startsWith(" ")) {
+      // context line
+      originalLines.push(line.slice(1));
+      modifiedLines.push(line.slice(1));
+    } else {
+      // bare line (no prefix) — treat as context
+      originalLines.push(line);
+      modifiedLines.push(line);
+    }
+  }
+
+  return {
+    original: originalLines.join("\n"),
+    modified: modifiedLines.join("\n"),
+  };
+}
+
 /** Compact combobox: pick existing category or type a new one */
 function CategoryCombobox({
   notebookId,
@@ -242,7 +489,9 @@ function CategoryCombobox({
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const { data: categories = [] } = trpc.notes.listCategories.useQuery({ notebookId });
+  const { data: categories = [] } = trpc.notes.listCategories.useQuery({
+    notebookId,
+  });
   const updateNote = trpc.notes.updateNote.useMutation();
   const createCategory = trpc.notes.createCategory.useMutation();
   const utils = trpc.useUtils();
@@ -263,7 +512,10 @@ function CategoryCombobox({
   useEffect(() => {
     if (!open) return;
     function handleClick(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
         setOpen(false);
         setSearch("");
       }
@@ -343,7 +595,9 @@ function CategoryCombobox({
             <button
               type="button"
               className={`w-full text-left px-3 py-1.5 text-xs hover:bg-base-300 transition-colors ${
-                currentCategoryId === null ? "text-primary font-medium" : "text-base-content/70"
+                currentCategoryId === null
+                  ? "text-primary font-medium"
+                  : "text-base-content/70"
               }`}
               onClick={() => assignCategory(null)}
             >

@@ -14,6 +14,7 @@ import type {
   FinishEntry,
   AiSearchEntry,
   AiSearchResultItem,
+  AttachedFile,
   ChatRequestBody,
   ChatMessagesResponse,
   InjectedContextItem,
@@ -30,6 +31,7 @@ interface NodeRow {
   content: string;
   timeline: string | null;
   injected_context: string | null;
+  attached_files: string | null;
   model: string | null;
   modelName: string | null;
   modelProvider: string | null;
@@ -73,6 +75,14 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
         .some((c) => c.name === "injected_context");
       if (!hasContextCol) {
         this.ctx.storage.sql.exec("ALTER TABLE nodes ADD COLUMN injected_context TEXT");
+      }
+
+      const hasAttachedFilesCol = this.ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(nodes)")
+        .toArray()
+        .some((c) => c.name === "attached_files");
+      if (!hasAttachedFilesCol) {
+        this.ctx.storage.sql.exec("ALTER TABLE nodes ADD COLUMN attached_files TEXT");
       }
 
       /* ── Migration: old flat "messages" table → tree "nodes" ── */
@@ -139,7 +149,8 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     const rows = this.ctx.storage.sql
       .exec<NodeRow>(
         `SELECT id, role, parent_id as parentId, content, timeline, model, model_name as modelName,
-                model_provider as modelProvider, model_params as modelParams, status, created_at as createdAt
+                model_provider as modelProvider, model_params as modelParams, status, created_at as createdAt,
+                injected_context, attached_files
          FROM nodes ORDER BY created_at ASC`,
       )
       .toArray();
@@ -160,11 +171,14 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     const userNodeId = nanoid();
     const now = Date.now();
 
+    const attachedFiles: AttachedFile[] = body.attachedFiles ?? [];
+
     const userNode: UserNode = {
       id: userNodeId,
       role: "user",
       parentId: body.parentId,
       content: body.message,
+      attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
       model: body.model,
       modelName: body.modelName ?? body.model,
       modelProvider: body.modelProvider ?? "",
@@ -181,8 +195,8 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     );
 
     this.ctx.storage.sql.exec(
-      `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at, attached_files)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       userNode.id,
       userNode.role,
       userNode.parentId,
@@ -194,33 +208,41 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       userNode.modelParams ? JSON.stringify(userNode.modelParams) : null,
       null,
       userNode.createdAt,
+      attachedFiles.length > 0 ? JSON.stringify(attachedFiles) : null,
     );
 
     /* Build the message path from root to this user node for LLM context */
     const allRows = this.ctx.storage.sql
       .exec<NodeRow>(
         `SELECT id, role, parent_id as parentId, content, timeline, model, model_name as modelName,
-                model_provider as modelProvider, model_params as modelParams, status, created_at as createdAt
+                model_provider as modelProvider, model_params as modelParams, status, created_at as createdAt,
+                injected_context, attached_files
          FROM nodes ORDER BY created_at ASC`,
       )
       .toArray();
     const allNodes = allRows.map(rowToNode);
 
     const pathToUser = resolvePathToLeaf(allNodes, userNodeId);
-    const llmMessages = pathToUser.map((n) => ({
-      role: n.role as "user" | "assistant",
-      content: n.content,
-    }));
+    const llmMessages = pathToUser.map((n) => {
+      let content = n.content;
+      if (n.role === "user" && n.attachedFiles && n.attachedFiles.length > 0) {
+        const fileList = n.attachedFiles
+          .map((f) => `- ${f.name} (file_id: ${f.id}, word_count: ${f.wordCount})`)
+          .join("\n");
+        content = `[attached files]\n${fileList}\n\n${content}`;
+      }
+      return { role: n.role as "user" | "assistant", content };
+    });
 
     const systemPrompts: string[] = [];
     if (body.systemPrompt) {
       systemPrompts.push(body.systemPrompt);
     }
     const injectedContext: InjectedContextItem[] = [];
-    const activeNoteIds = (body.activeNotes ?? []).map((n) => n.id);
-    if (body.activeNotes) {
-      for (const note of body.activeNotes) {
-        injectedContext.push({ name: note.name, snippet: `file_id: ${note.id}` });
+    const activeNoteIds = attachedFiles.map((f) => f.id);
+    if (attachedFiles.length > 0) {
+      for (const f of attachedFiles) {
+        injectedContext.push({ name: f.name, snippet: `file_id: ${f.id}, word_count: ${f.wordCount}` });
       }
     }
 
@@ -766,11 +788,17 @@ function rowToNode(row: NodeRow): ChatNode {
     } satisfies AssistantNode;
   }
 
+  let attachedFilesArr: AttachedFile[] | undefined;
+  if (row.attached_files) {
+    try { attachedFilesArr = JSON.parse(row.attached_files); } catch {}
+  }
+
   return {
     id: row.id,
     role: "user",
     parentId: row.parentId,
     content: row.content,
+    attachedFiles: attachedFilesArr,
     model: row.model ?? "",
     modelName: row.modelName ?? "",
     modelProvider: row.modelProvider ?? "",

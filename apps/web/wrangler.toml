@@ -63,5 +63,5 @@ new_sqlite_classes = ["SearXNG"]
 
 [[containers]]
 class_name = "SearXNG"
-image = "registry.cloudflare.com/3244c8f91cd34317ce18652158e5853a/ew-o1-searxng:62caf439"
+image = "./containers/searxng/Dockerfile"
 max_instances = 2

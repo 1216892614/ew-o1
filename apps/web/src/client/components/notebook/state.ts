@@ -25,3 +25,32 @@ export const openedNoteIdAtom = atom<string | null, [string | null], void>(
 );
 
 export const sortModeAtom = atom<"latest" | "name">("latest");
+
+/* ── Follow mode (right panel follows agent tool calls) ──── */
+
+export interface ToolFocusRead {
+  type: "read";
+  fileId: string;
+  filename: string;
+  content: string;
+  totalLines: number;
+  lineStart?: number;
+  lineEnd?: number;
+}
+
+export interface ToolFocusEdit {
+  type: "edit";
+  fileId: string;
+  filename: string;
+  diff: string;
+  /** Result message from edit_content */
+  result?: string;
+}
+
+export type ToolFocus = ToolFocusRead | ToolFocusEdit;
+
+/** Whether follow mode is active (right panel follows tool calls) */
+export const followModeAtom = atom<boolean>(true);
+
+/** Latest tool focus event from the agent */
+export const lastToolFocusAtom = atom<ToolFocus | null>(null);
