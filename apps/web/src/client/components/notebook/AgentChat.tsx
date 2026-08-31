@@ -7,7 +7,6 @@ import {
   CaretLeft,
   CaretRight,
   ChatCircleDots,
-  ChatText,
   Check,
   CheckCircle,
   Copy,
@@ -26,7 +25,7 @@ import {
   Wrench,
   X,
 } from "@phosphor-icons/react";
-import { useSetAtom } from "jotai";
+import { useAtom, useSetAtom } from "jotai";
 import {
   type KeyboardEvent,
   useCallback,
@@ -48,9 +47,7 @@ import type {
   ChatMessagesResponse,
   ChatNode,
   ChatRequestBody,
-  FinishEntry,
   InjectedContextItem,
-  ReplyEntry,
   TextEntry,
   ThinkingEntry,
   TimelineEntry,
@@ -59,12 +56,15 @@ import type {
 } from "@/shared/chat-types";
 import {
   buildChildrenMap,
-  findLatestLeaf,
   getSiblingInfo,
   resolvePathToLeaf,
 } from "@/shared/chat-types";
 import { MODELS, type ModelConfig } from "./ModelSelector";
-import { lastToolFocusAtom } from "./state";
+import {
+  agentStreamingAtom,
+  allowAskToolAtom,
+  lastToolFocusAtom,
+} from "./state";
 
 const FILE_MUTATING_TOOLS = new Set(["edit_file", "edit_content"]);
 
@@ -153,12 +153,16 @@ export function AgentChat({
   });
   const [isChatUploading, setIsChatUploading] = useState(false);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const isStuckToBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const skipLoadHistoryRef = useRef(false);
   const streamingAssistantRef = useRef<StreamingAssistant | null>(null);
   const setLastToolFocus = useSetAtom(lastToolFocusAtom);
+  const setAgentStreaming = useSetAtom(agentStreamingAtom);
+  const [allowAskTool, setAllowAskTool] = useAtom(allowAskToolAtom);
 
   /* Wrapper to keep ref in sync with state */
   const setStreamingAssistant = useCallback(
@@ -193,7 +197,7 @@ export function AgentChat({
 
   /* Compute active path from allNodes + leafId */
   const activePath = resolvePathToLeaf(allNodes, leafId);
-  const activePathIds = new Set(activePath.map((n) => n.id));
+  const _activePathIds = new Set(activePath.map((n) => n.id));
 
   function handleNewChat() {
     setCurrentSessionId(null);
@@ -209,7 +213,7 @@ export function AgentChat({
   useEffect(() => {
     if (currentSessionId || !sessions || sessions.length === 0) return;
     setCurrentSessionId(sessions[0].id);
-  }, [sessions]);
+  }, [sessions, setCurrentSessionId, currentSessionId]);
 
   /* Load history */
   useEffect(() => {
@@ -219,7 +223,7 @@ export function AgentChat({
       return;
     }
     loadHistory(notebookId, currentSessionId);
-  }, [currentSessionId, notebookId]);
+  }, [currentSessionId, notebookId, loadHistory]);
 
   /** Restore ModelConfig from the last user node in loaded history */
   function restoreModelConfig(nodes: ChatNode[]) {
@@ -277,10 +281,19 @@ export function AgentChat({
     }
   }, [droppedNoteIdsForChat, handleNoteDrop, clearDroppedNoteIds]);
 
-  /* Auto-scroll */
+  /* Smart auto-scroll: only scroll to bottom when user hasn't scrolled away */
+  const handleChatScroll = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const threshold = 60;
+    isStuckToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+  }, []);
+
   useEffect(() => {
+    if (!isStuckToBottomRef.current) return;
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activePath, streamingAssistant]);
+  }, []);
 
   /* Upload files from chat input → auto-attach */
   const handleChatUpload = useCallback(
@@ -397,6 +410,7 @@ export function AgentChat({
     leafId,
     isCompressing,
     compressMode,
+    loadHistory,
   ]);
 
   /* ── Navigate to a different leaf ─────────────────────── */
@@ -462,7 +476,9 @@ export function AgentChat({
       setAttachedNoteIds(new Set());
       setShowAttachPopover(false);
     }
+    isStuckToBottomRef.current = true;
     setIsStreaming(true);
+    setAgentStreaming(true);
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -516,6 +532,7 @@ export function AgentChat({
         modelParams: modelConfig.params,
         systemPrompt,
         attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
+        disabledTools: allowAskTool ? undefined : ["ask"],
       };
 
       const response = await fetch("/api/chat", {
@@ -577,7 +594,7 @@ export function AgentChat({
         tl: TimelineEntry[],
         tc: ToolCallEntry,
       ): TimelineEntry[] => {
-        if (!["reply", "ask", "finish"].includes(tc.name)) return tl;
+        if (!["ask", "finish"].includes(tc.name)) return tl;
         const tcIndex = tl.findIndex(
           (e) => e.kind === "tool_call" && e.toolCallId === tc.toolCallId,
         );
@@ -585,9 +602,7 @@ export function AgentChat({
         const nextEntry = tl[tcIndex + 1];
         if (
           nextEntry &&
-          (nextEntry.kind === "reply" ||
-            nextEntry.kind === "ask" ||
-            nextEntry.kind === "finish")
+          (nextEntry.kind === "ask" || nextEntry.kind === "finish")
         ) {
           return tl;
         }
@@ -600,12 +615,6 @@ export function AgentChat({
         const before = tl.slice(0, tcIndex + 1);
         const after = tl.slice(tcIndex + 1);
         switch (tc.name) {
-          case "reply":
-            return [
-              ...before,
-              { kind: "reply", message: (parsed.message ?? "") as string },
-              ...after,
-            ];
           case "ask": {
             updateStreaming((s) => ({ ...s, status: "waiting" }));
             return [
@@ -677,6 +686,23 @@ export function AgentChat({
                     e === last ? { ...last, content: last.content + delta } : e,
                   );
                 });
+                /* Emit thinking focus for follow mode */
+                {
+                  const currentTl =
+                    streamingAssistantRef.current?.timeline ?? [];
+                  const lastThinking = [...currentTl]
+                    .reverse()
+                    .find((e) => e.kind === "thinking") as
+                    | ThinkingEntry
+                    | undefined;
+                  if (lastThinking) {
+                    setLastToolFocus({
+                      type: "thinking",
+                      content: lastThinking.content + delta,
+                      done: false,
+                    });
+                  }
+                }
                 break;
               }
               case "THINKING_END":
@@ -686,6 +712,23 @@ export function AgentChat({
                     e.kind === "thinking" && !e.done ? { ...e, done: true } : e,
                   ),
                 );
+                /* Mark thinking done in follow mode */
+                {
+                  const currentTl =
+                    streamingAssistantRef.current?.timeline ?? [];
+                  const lastThinking = [...currentTl]
+                    .reverse()
+                    .find((e) => e.kind === "thinking") as
+                    | ThinkingEntry
+                    | undefined;
+                  if (lastThinking) {
+                    setLastToolFocus({
+                      type: "thinking",
+                      content: lastThinking.content,
+                      done: true,
+                    });
+                  }
+                }
                 break;
               }
 
@@ -784,6 +827,26 @@ export function AgentChat({
                         diff: args.diff ?? "",
                         result: content,
                       });
+                    } else if (completedTc.name === "search_file" && content) {
+                      const res = JSON.parse(content);
+                      if (Array.isArray(res.results)) {
+                        setLastToolFocus({
+                          type: "search",
+                          query: args.query ?? "",
+                          results: res.results.map(
+                            (r: Record<string, unknown>) => ({
+                              fileId: (r.file_id ?? "") as string,
+                              filename: (r.filename ?? "") as string,
+                              summary: (r.summary ?? "") as string,
+                              relevance: r.relevance as number | undefined,
+                              itemType: r.type as
+                                | "file"
+                                | "category"
+                                | undefined,
+                            }),
+                          ),
+                        });
+                      }
                     }
                   } catch {
                     // ignore parse failures
@@ -877,6 +940,20 @@ export function AgentChat({
                 if (evtName === "ai_search" && evtValue) {
                   const searchEntry = evtValue as unknown as AiSearchEntry;
                   updateTimeline((tl) => [...tl, searchEntry]);
+                  /* Emit search focus for follow mode */
+                  if (Array.isArray(searchEntry.results)) {
+                    setLastToolFocus({
+                      type: "search",
+                      query: searchEntry.query ?? "",
+                      results: searchEntry.results.map((r) => ({
+                        fileId: r.fileId ?? "",
+                        filename: r.filename ?? "",
+                        summary: r.snippet ?? "",
+                        relevance: r.score,
+                        itemType: "file" as const,
+                      })),
+                    });
+                  }
                 }
                 break;
               }
@@ -895,6 +972,7 @@ export function AgentChat({
     } finally {
       finalizeStreaming();
       setIsStreaming(false);
+      setAgentStreaming(false);
       abortControllerRef.current = null;
     }
 
@@ -989,7 +1067,7 @@ export function AgentChat({
   /* ── Edit user message ────────────────────────────────── */
   function handleEditUserMessage(nodeId: string, newContent: string) {
     const node = allNodes.find((n) => n.id === nodeId);
-    if (!node || node.role !== "user") return;
+    if (node?.role !== "user") return;
     /* Send as a new sibling: same parentId as the edited node */
     sendMessage(newContent, node.parentId);
   }
@@ -997,7 +1075,7 @@ export function AgentChat({
   /* ── Retry (re-generate from a user message) ──────────── */
   function handleRetry(userNodeId: string) {
     const node = allNodes.find((n) => n.id === userNodeId);
-    if (!node || node.role !== "user") return;
+    if (node?.role !== "user") return;
     sendMessage(node.content, node.parentId);
   }
 
@@ -1022,8 +1100,7 @@ export function AgentChat({
 
   /* ── Detect pending ask from streaming timeline ────────── */
   const pendingAsk = useMemo(() => {
-    if (!streamingAssistant || streamingAssistant.status !== "waiting")
-      return null;
+    if (streamingAssistant?.status !== "waiting") return null;
     const askEntry = streamingAssistant.timeline.find(
       (e): e is AskEntry => e.kind === "ask" && !e.resolved,
     );
@@ -1074,7 +1151,11 @@ export function AgentChat({
       </div>
 
       {/* Chat Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-4">
+      <div
+        ref={chatScrollRef}
+        onScroll={handleChatScroll}
+        className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-4"
+      >
         {renderNodes.length === 0 && !streamingAssistant ? (
           <div className="flex-1 flex flex-col items-center justify-center text-base-content/40 gap-2">
             <ChatCircleDots size={48} weight="thin" />
@@ -1217,6 +1298,17 @@ export function AgentChat({
 
             {/* Spacer */}
             <div className="flex-1" />
+
+            {/* Ask tool toggle */}
+            <label className="flex items-center gap-1 cursor-pointer text-base-content/40 text-xs">
+              <input
+                type="checkbox"
+                className="toggle toggle-xs toggle-primary"
+                checked={allowAskTool}
+                onChange={(e) => setAllowAskTool(e.target.checked)}
+              />
+              <span>追问</span>
+            </label>
 
             {/* Compress conversation - right aligned */}
             <select
@@ -1491,6 +1583,33 @@ function AttachedFilesBadge({ files }: { files: AttachedFile[] }) {
   );
 }
 
+/* ── Split timeline into interleaved text / non-text segments ── */
+
+type TimelineSegment =
+  | { kind: "text"; entry: TextEntry }
+  | { kind: "track"; entries: TimelineEntry[] };
+
+function splitTimelineSegments(timeline: TimelineEntry[]): TimelineSegment[] {
+  const segments: TimelineSegment[] = [];
+  let trackBuf: TimelineEntry[] = [];
+
+  for (const entry of timeline) {
+    if (entry.kind === "text") {
+      if (trackBuf.length > 0) {
+        segments.push({ kind: "track", entries: trackBuf });
+        trackBuf = [];
+      }
+      segments.push({ kind: "text", entry });
+    } else {
+      trackBuf.push(entry);
+    }
+  }
+  if (trackBuf.length > 0) {
+    segments.push({ kind: "track", entries: trackBuf });
+  }
+  return segments;
+}
+
 /* ── Assistant block (persisted) ────────────────────────── */
 
 function AssistantBlock({
@@ -1501,10 +1620,6 @@ function AssistantBlock({
   notebookId: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const hasTimelineEvents = node.timeline.some(
-    (t) =>
-      t.kind === "thinking" || t.kind === "tool_call" || t.kind === "ai_search",
-  );
   const createNoteMut = trpc.notes.createNote.useMutation();
   const updateNoteMut = trpc.notes.updateNote.useMutation();
   const utils = trpc.useUtils();
@@ -1536,9 +1651,9 @@ function AssistantBlock({
       ? Math.max(1, Math.round((Date.now() - node.createdAt) / 1000))
       : 0;
 
-  const timelineSteps = node.timeline.filter((e) => e.kind !== "text");
-  const textEntries = node.timeline.filter(
-    (e): e is TextEntry => e.kind === "text",
+  const segments = useMemo(
+    () => splitTimelineSegments(node.timeline),
+    [node.timeline],
   );
 
   return (
@@ -1546,11 +1661,13 @@ function AssistantBlock({
       {node.injectedContext && node.injectedContext.length > 0 && (
         <ContextBanner items={node.injectedContext} />
       )}
-      {timelineSteps.length > 0 && <TimelineTrack entries={timelineSteps} />}
-
-      {textEntries.map((entry, i) => (
-        <TextNode key={i} entry={entry} />
-      ))}
+      {segments.map((seg, i) =>
+        seg.kind === "text" ? (
+          <TextNode key={i} entry={seg.entry} />
+        ) : (
+          <TimelineTrack key={i} entries={seg.entries} />
+        ),
+      )}
 
       {/* Bottom-left: model name, elapsed, status, actions */}
       <div className="flex items-center gap-2 text-[10px] text-base-content/30">
@@ -1590,9 +1707,9 @@ function StreamingAssistantBlock({
   assistant: StreamingAssistant;
   onSubmitAnswer?: (answers: Record<string, string | string[]>) => void;
 }) {
-  const timelineSteps = assistant.timeline.filter((e) => e.kind !== "text");
-  const textEntries = assistant.timeline.filter(
-    (e): e is TextEntry => e.kind === "text",
+  const segments = useMemo(
+    () => splitTimelineSegments(assistant.timeline),
+    [assistant.timeline],
   );
 
   return (
@@ -1600,17 +1717,18 @@ function StreamingAssistantBlock({
       {assistant.injectedContext && assistant.injectedContext.length > 0 && (
         <ContextBanner items={assistant.injectedContext} />
       )}
-      {timelineSteps.length > 0 && (
-        <TimelineTrack
-          entries={timelineSteps}
-          streamingStatus={assistant.status}
-          onSubmitAnswer={onSubmitAnswer}
-        />
+      {segments.map((seg, i) =>
+        seg.kind === "text" ? (
+          <TextNode key={i} entry={seg.entry} />
+        ) : (
+          <TimelineTrack
+            key={i}
+            entries={seg.entries}
+            streamingStatus={assistant.status}
+            onSubmitAnswer={onSubmitAnswer}
+          />
+        ),
       )}
-
-      {textEntries.map((entry, i) => (
-        <TextNode key={i} entry={entry} />
-      ))}
 
       <div className="flex items-center gap-2 text-[10px] text-base-content/30">
         <span>{assistant.modelName}</span>
@@ -1904,8 +2022,6 @@ function timelineDotIcon(entry: TimelineEntry) {
       return (
         <MagnifyingGlass size={11} weight="duotone" className="text-info/60" />
       );
-    case "reply":
-      return <ChatText size={11} className="text-base-content/30" />;
     case "ask":
       return <Lightning size={11} weight="fill" className="text-warning" />;
     case "finish":
@@ -1931,12 +2047,6 @@ function TimelineStepContent({
       return <ToolCallContent entry={entry} />;
     case "ai_search":
       return <AiSearchContent entry={entry} />;
-    case "reply":
-      return (
-        <span className="text-xs text-base-content/60 leading-relaxed">
-          {entry.message}
-        </span>
-      );
     case "ask":
       return (
         <AskContent entry={entry} isWaiting={streamingStatus === "waiting"} />
@@ -1956,10 +2066,26 @@ function TimelineStepContent({
 
 function ThinkingContent({ entry }: { entry: ThinkingEntry }) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const thinkingStuckRef = useRef(true);
 
   useEffect(() => {
     if (entry.done && detailsRef.current) detailsRef.current.open = false;
   }, [entry.done]);
+
+  /* Auto-scroll thinking content to bottom while streaming */
+  useEffect(() => {
+    if (!entry.done && thinkingStuckRef.current && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [entry.done]);
+
+  const handleThinkingScroll = useCallback(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    thinkingStuckRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  }, []);
 
   return (
     <details ref={detailsRef} open={!entry.done}>
@@ -1970,7 +2096,11 @@ function ThinkingContent({ entry }: { entry: ThinkingEntry }) {
         />
         <span>{entry.done ? "思考完成" : "思考中…"}</span>
       </summary>
-      <div className="text-xs text-base-content/30 mt-1 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed">
+      <div
+        ref={contentRef}
+        onScroll={handleThinkingScroll}
+        className="text-xs text-base-content/30 mt-1 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed"
+      >
         {entry.content}
       </div>
     </details>

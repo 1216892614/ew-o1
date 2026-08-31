@@ -26,7 +26,6 @@ export type ToolCallEntry = {
 
 export type TextEntry = { kind: "text"; content: string; streaming: boolean };
 
-export type ReplyEntry = { kind: "reply"; message: string };
 
 export type AskQuestion = {
   id: string;
@@ -58,7 +57,7 @@ export type AiSearchEntry = {
   round: number;
 };
 
-export type TimelineEntry = ThinkingEntry | ToolCallEntry | TextEntry | ReplyEntry | AskEntry | FinishEntry | AiSearchEntry;
+export type TimelineEntry = ThinkingEntry | ToolCallEntry | TextEntry | AskEntry | FinishEntry | AiSearchEntry;
 
 /* ── Attached files (files referenced in a user message) ── */
 
@@ -130,6 +129,8 @@ export interface ChatRequestBody {
   modelParams?: ModelParams;
   systemPrompt?: string;
   attachedFiles?: AttachedFile[];
+  /** Tool names to exclude from this request */
+  disabledTools?: string[];
 }
 
 /** GET /api/chat/messages response */

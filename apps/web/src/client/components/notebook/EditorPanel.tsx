@@ -5,8 +5,7 @@ import {
   CaretDown,
   Eye,
   FolderSimple,
-  LinkBreak,
-  LinkSimple,
+  MagnifyingGlass,
   NotePencil,
   PencilSimple,
   Plus,
@@ -18,6 +17,7 @@ import { Streamdown } from "streamdown";
 import { trpc } from "@/client/lib/trpc";
 import {
   activeNoteIdAtom,
+  agentStreamingAtom,
   followModeAtom,
   lastToolFocusAtom,
   openedNoteIdsAtom,
@@ -33,6 +33,7 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
   const [activeNoteId, setActiveNoteId] = useAtom(activeNoteIdAtom);
   const [followMode, setFollowMode] = useAtom(followModeAtom);
   const lastToolFocus = useAtomValue(lastToolFocusAtom);
+  const agentStreaming = useAtomValue(agentStreamingAtom);
   const [theme, setTheme] = useState<"vs-dark" | "vs">("vs-dark");
   const [viewMode, setViewMode] = useState<"edit" | "preview">("edit");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -136,37 +137,54 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
       >
         {/* Header bar with follow switch */}
         <div className="flex h-10 items-center border-b border-base-300 px-3 gap-2">
-          <div className="flex items-center gap-1.5 shrink-0">
-            <label className="swap swap-rotate" title="跟随模式">
-              <input
-                type="checkbox"
-                checked={followMode}
-                onChange={(e) => setFollowMode(e.target.checked)}
-              />
-              <LinkSimple size={14} className="swap-on text-primary" />
-              <LinkBreak size={14} className="swap-off text-base-content/40" />
-            </label>
+          <label className="flex items-center gap-1.5 cursor-pointer shrink-0">
+            <input
+              type="checkbox"
+              className="toggle toggle-xs toggle-primary"
+              checked={followMode}
+              onChange={(e) => setFollowMode(e.target.checked)}
+            />
             <span className="text-xs text-primary font-medium">跟随</span>
-          </div>
+          </label>
+
+          {agentStreaming && (
+            <span className="loading loading-ring loading-xs text-primary" />
+          )}
 
           {lastToolFocus && (
             <>
               <span className="text-base-content/20">|</span>
               <span className="text-xs text-base-content/60 truncate">
-                {lastToolFocus.filename || lastToolFocus.fileId.slice(0, 8)}
-                {lastToolFocus.type === "read" &&
-                  lastToolFocus.lineStart != null && (
-                    <span className="text-base-content/40">
-                      {" "}
-                      L{lastToolFocus.lineStart}
-                      {lastToolFocus.lineEnd != null &&
-                        `-${lastToolFocus.lineEnd}`}
+                {lastToolFocus.type === "thinking" ? (
+                  <span className="italic text-base-content/50">思考中...</span>
+                ) : lastToolFocus.type === "search" ? (
+                  <>
+                    <MagnifyingGlass size={12} className="inline mr-1" />
+                    搜索: {lastToolFocus.query}
+                    <span className="ml-1 badge badge-xs badge-ghost">
+                      {lastToolFocus.results.length}
                     </span>
-                  )}
-                {lastToolFocus.type === "edit" && (
-                  <span className="ml-1 badge badge-xs badge-outline badge-warning">
-                    diff
-                  </span>
+                  </>
+                ) : (
+                  <>
+                    {"filename" in lastToolFocus &&
+                      (lastToolFocus.filename ||
+                        lastToolFocus.fileId.slice(0, 8))}
+                    {lastToolFocus.type === "read" &&
+                      lastToolFocus.lineStart != null && (
+                        <span className="text-base-content/40">
+                          {" "}
+                          L{lastToolFocus.lineStart}
+                          {lastToolFocus.lineEnd != null &&
+                            `-${lastToolFocus.lineEnd}`}
+                        </span>
+                      )}
+                    {lastToolFocus.type === "edit" && (
+                      <span className="ml-1 badge badge-xs badge-outline badge-warning">
+                        diff
+                      </span>
+                    )}
+                  </>
                 )}
               </span>
             </>
@@ -179,8 +197,17 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
             <FollowModeContent focus={lastToolFocus} theme={theme} />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-base-content/30">
-              <LinkSimple size={48} weight="thin" />
-              <span className="text-sm">等待 AI 工具调用...</span>
+              {agentStreaming ? (
+                <>
+                  <span className="loading loading-dots loading-lg" />
+                  <span className="text-sm">AI 正在处理...</span>
+                </>
+              ) : (
+                <>
+                  <NotePencil size={48} weight="thin" />
+                  <span className="text-sm">等待 AI 工具调用...</span>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -199,14 +226,16 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
         <div className="flex h-10 items-center border-b border-base-300">
           {/* Follow mode switch (left) */}
           <div className="flex items-center gap-1 px-2 shrink-0 border-r border-base-300">
-            <label className="swap swap-rotate" title="跟随模式">
+            <label
+              className="flex items-center gap-1 cursor-pointer"
+              title="跟随模式"
+            >
               <input
                 type="checkbox"
+                className="toggle toggle-xs toggle-primary"
                 checked={followMode}
                 onChange={(e) => setFollowMode(e.target.checked)}
               />
-              <LinkSimple size={14} className="swap-on text-primary" />
-              <LinkBreak size={14} className="swap-off text-base-content/40" />
             </label>
           </div>
 
@@ -277,14 +306,16 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
       ) : (
         <div className="flex h-10 items-center border-b border-base-300 px-3 gap-2">
           {/* Follow mode switch even when no tabs */}
-          <label className="swap swap-rotate" title="跟随模式">
+          <label
+            className="flex items-center gap-1 cursor-pointer"
+            title="跟随模式"
+          >
             <input
               type="checkbox"
+              className="toggle toggle-xs toggle-primary"
               checked={followMode}
               onChange={(e) => setFollowMode(e.target.checked)}
             />
-            <LinkSimple size={14} className="swap-on text-primary" />
-            <LinkBreak size={14} className="swap-off text-base-content/40" />
           </label>
           <span className="text-sm text-base-content/50">
             选择一个笔记开始编辑
@@ -410,6 +441,73 @@ function FollowModeContent({
           domReadOnly: true,
         }}
       />
+    );
+  }
+
+  if (focus.type === "search") {
+    return (
+      <div className="h-full overflow-y-auto p-4">
+        <div className="mb-3 flex items-center gap-2 text-sm text-base-content/60">
+          <MagnifyingGlass size={16} />
+          <span>
+            搜索:{" "}
+            <strong className="text-base-content/80">{focus.query}</strong>
+          </span>
+          <span className="badge badge-sm badge-ghost">
+            {focus.results.length} 条结果
+          </span>
+        </div>
+        {focus.results.length === 0 ? (
+          <div className="text-center text-base-content/30 py-8">
+            <span className="text-sm">无匹配结果</span>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {focus.results.map((item, i) => (
+              <div
+                key={`${item.fileId}-${i}`}
+                className="flex items-start gap-2 rounded-lg border border-base-300 bg-base-200/30 p-2.5 text-sm"
+              >
+                <FolderSimple
+                  size={16}
+                  className="text-base-content/40 shrink-0 mt-0.5"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium text-base-content/80 truncate">
+                    {item.filename || item.fileId.slice(0, 12)}
+                  </div>
+                  {item.summary && (
+                    <div className="text-xs text-base-content/50 mt-0.5 line-clamp-2">
+                      {item.summary}
+                    </div>
+                  )}
+                </div>
+                {item.relevance != null && (
+                  <span className="badge badge-xs badge-ghost shrink-0">
+                    {Math.round(item.relevance * 100)}%
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (focus.type === "thinking") {
+    return (
+      <div className="h-full overflow-y-auto p-4">
+        <div className="mb-3 flex items-center gap-2 text-sm text-base-content/60">
+          {!focus.done && (
+            <span className="loading loading-spinner loading-xs" />
+          )}
+          <span className="italic">思考过程</span>
+        </div>
+        <div className="prose prose-sm max-w-none text-base-content/60 [&_pre]:bg-base-200 [&_pre]:text-base-content/80 [&_code]:text-base-content/80 whitespace-pre-wrap font-mono text-xs leading-relaxed">
+          {focus.content || "..."}
+        </div>
+      </div>
     );
   }
 

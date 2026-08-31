@@ -9,7 +9,6 @@ import type {
   TimelineEntry,
   ThinkingEntry,
   ToolCallEntry,
-  ReplyEntry,
   AskEntry,
   FinishEntry,
   AiSearchEntry,
@@ -299,6 +298,12 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       activeNoteIds,
     });
 
+    /* Filter out client-disabled tools (e.g. "ask" when user toggles it off) */
+    const disabledSet = new Set(body.disabledTools ?? []);
+    const filteredTools = disabledSet.size > 0
+      ? tools.filter((t: { name?: string }) => !disabledSet.has(t.name ?? ""))
+      : tools;
+
     const modelOptions: Record<string, unknown> = {};
     if (body.modelParams?.temperature !== undefined) {
       modelOptions.temperature = body.modelParams.temperature;
@@ -319,7 +324,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       adapter,
       messages: llmMessages,
       systemPrompts,
-      tools,
+      tools: filteredTools,
       modelOptions,
       maxRounds: MAX_ROUNDS,
       doAiSearch,
@@ -658,12 +663,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
             entry.result = ((c.content ?? c.result ?? "") as string);
 
             const toolName = entry.name;
-            if (toolName === "reply") {
-              try {
-                const args = JSON.parse(entry.args);
-                timeline.push({ kind: "reply", message: args.message ?? "" } satisfies ReplyEntry);
-              } catch {}
-            } else if (toolName === "ask") {
+            if (toolName === "ask") {
               try {
                 const args = JSON.parse(entry.args);
                 timeline.push({ kind: "ask", questions: args.questions ?? [], resolved: false } satisfies AskEntry);

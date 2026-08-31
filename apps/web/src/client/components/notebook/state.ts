@@ -47,10 +47,40 @@ export interface ToolFocusEdit {
   result?: string;
 }
 
-export type ToolFocus = ToolFocusRead | ToolFocusEdit;
+export interface ToolFocusSearchItem {
+  fileId: string;
+  filename: string;
+  summary: string;
+  relevance?: number;
+  itemType?: "file" | "category";
+}
+
+export interface ToolFocusSearch {
+  type: "search";
+  query: string;
+  results: ToolFocusSearchItem[];
+}
+
+export interface ToolFocusThinking {
+  type: "thinking";
+  content: string;
+  done: boolean;
+}
+
+export type ToolFocus =
+  | ToolFocusRead
+  | ToolFocusEdit
+  | ToolFocusSearch
+  | ToolFocusThinking;
 
 /** Whether follow mode is active (right panel follows tool calls) */
 export const followModeAtom = atom<boolean>(true);
 
 /** Latest tool focus event from the agent */
 export const lastToolFocusAtom = atom<ToolFocus | null>(null);
+
+/** Whether agent is currently streaming (for follow mode spinner) */
+export const agentStreamingAtom = atom<boolean>(false);
+
+/** Whether the ask tool is allowed (user can toggle to prevent agent from pausing) */
+export const allowAskToolAtom = atom<boolean>(false);

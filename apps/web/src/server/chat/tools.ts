@@ -363,8 +363,8 @@ export function createAgentTools(params: CreateAgentToolsParams) {
                 .bind(notebookId)
                 .first<{ next_pos: number }>();
               await db
-                .prepare("INSERT INTO categories (id, notebook_id, name, position, is_archive) VALUES (?, ?, ?, ?, 0)")
-                .bind(newCatId, notebookId, args.new_tag, maxPos?.next_pos ?? 0)
+                .prepare("INSERT INTO categories (id, notebook_id, name, position, is_archive, created_at) VALUES (?, ?, ?, ?, 0, ?)")
+                .bind(newCatId, notebookId, args.new_tag, maxPos?.next_pos ?? 0, Date.now())
                 .run();
               category = { id: newCatId };
             }
@@ -527,14 +527,6 @@ export function createAgentTools(params: CreateAgentToolsParams) {
           return { title: "Fetch error", content: String(err) };
         }
       },
-    }),
-
-    tool({
-      name: "reply",
-      description: "Send a progress message to the user without pausing the loop.",
-      inputSchema: z.object({ message: z.string() }),
-      outputSchema: z.object({ success: z.boolean() }),
-      execute: async () => ({ success: true }),
     }),
 
     tool({
