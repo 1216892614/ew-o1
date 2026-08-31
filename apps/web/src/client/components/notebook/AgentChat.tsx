@@ -599,7 +599,7 @@ export function AgentChat({
         "",
         "- search_file：搜索笔记内容（语义搜索）或按文件名查找。query 为 \"*\" 列出所有分类。",
         "- read_file：按 file_id 阅读文件，支持行号范围。编辑前必须先 read。",
-        "- edit_file：修改文件名或分类。",
+        "- edit_file：修改文件名或分类，或新建文件（file_id 传 \"new_file\" 或空字符串）。",
         "- edit_content：用 unified diff 格式修改文件内容。必须先 read_file 再编辑。",
         "- web_search：联网搜索。",
         "- web_page_read：阅读网页内容。",
@@ -2486,7 +2486,7 @@ function AskInputPanel({
           <div className="text-sm font-medium text-base-content/80 mb-2">
             {currentQ.question}
           </div>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-col items-start gap-1.5">
             {currentQ.options.map((opt) => {
               const selected = currentQ.multi
                 ? ((selections[currentQ.id] ?? []) as string[]).includes(

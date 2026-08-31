@@ -564,8 +564,9 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     const runningMessages = [...messages];
     const baseSystemPrompts = [...systemPrompts];
     let prevRoundHadToolCalls = false;
+    const MAX_ROUNDS = 20;
 
-    for (let round = 1; ; round++) {
+    for (let round = 1; round <= MAX_ROUNDS; round++) {
       if (this.finishCalled) break;
 
       let roundSystemPrompts = [...baseSystemPrompts];
@@ -640,16 +641,44 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
 
       let roundAssistantText = "";
       let hadToolCalls = false;
+      const toolCallSummaries: { name: string; args: string; result: string }[] = [];
+      let currentToolCall: { id: string; name: string; args: string; result: string } | null = null;
+
+      const processChunk = (chunk: StreamChunk) => {
+        const type = chunk.type as string;
+        const c = chunk as Record<string, unknown>;
+        if (type === "TEXT_MESSAGE_CONTENT") {
+          roundAssistantText += (c.delta ?? "") as string;
+        }
+        if (type === "TOOL_CALL_START") {
+          hadToolCalls = true;
+          currentToolCall = {
+            id: (c.toolCallId ?? "") as string,
+            name: ((c.toolCallName ?? c.toolName ?? "tool") as string),
+            args: "",
+            result: "",
+          };
+        }
+        if (type === "TOOL_CALL_ARGS" && currentToolCall && c.toolCallId === currentToolCall.id) {
+          currentToolCall.args += (c.delta ?? "") as string;
+        }
+        if ((type === "TOOL_CALL_END" || type === "TOOL_CALL_RESULT") && currentToolCall) {
+          if (c.toolCallId === currentToolCall.id) {
+            const raw = (c.result ?? c.content ?? "") as string;
+            currentToolCall.result = typeof raw === "string" ? raw : JSON.stringify(raw);
+            toolCallSummaries.push({
+              name: currentToolCall.name,
+              args: currentToolCall.args.slice(0, 500),
+              result: currentToolCall.result.slice(0, 800),
+            });
+            currentToolCall = null;
+          }
+        }
+      };
 
       try {
         for await (const chunk of runRound(this)) {
-          const type = chunk.type as string;
-          if (type === "TEXT_MESSAGE_CONTENT") {
-            roundAssistantText += ((chunk as Record<string, unknown>).delta ?? "") as string;
-          }
-          if (type === "TOOL_CALL_START") {
-            hadToolCalls = true;
-          }
+          processChunk(chunk);
           yield chunk;
         }
       } catch (err) {
@@ -666,14 +695,10 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
             // Retry the round with compressed messages
             roundAssistantText = "";
             hadToolCalls = false;
+            toolCallSummaries.length = 0;
+            currentToolCall = null;
             for await (const chunk of runRound(this)) {
-              const type = chunk.type as string;
-              if (type === "TEXT_MESSAGE_CONTENT") {
-                roundAssistantText += ((chunk as Record<string, unknown>).delta ?? "") as string;
-              }
-              if (type === "TOOL_CALL_START") {
-                hadToolCalls = true;
-              }
+              processChunk(chunk);
               yield chunk;
             }
           } else {
@@ -684,12 +709,37 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
         }
       }
 
+      prevRoundHadToolCalls = hadToolCalls;
+      if (this.finishCalled) break;
+
+      /* ── Build round context for next iteration ─────────────────────
+       *  The inner chat() manages tool loops within a round, but the outer
+       *  loop loses tool-call context between rounds. Inject a structured
+       *  summary so the model knows what it already did. ── */
+
+      const summaryParts: string[] = [];
+      if (roundAssistantText) {
+        summaryParts.push(`你的回复：\n${roundAssistantText}`);
+      }
+      if (toolCallSummaries.length > 0) {
+        const toolLines = toolCallSummaries.map((tc, i) =>
+          `  ${i + 1}. ${tc.name}(${tc.args}) → ${tc.result}`,
+        );
+        summaryParts.push(`你调用的工具：\n${toolLines.join("\n")}`);
+      }
+
+      // Push assistant text so conversation structure stays valid
       if (roundAssistantText) {
         runningMessages.push({ role: "assistant", content: roundAssistantText });
       }
 
-      prevRoundHadToolCalls = hadToolCalls;
-      if (this.finishCalled) break;
+      // Inject round context as a user message for the next round
+      const roundHint = [
+        `[系统] 当前是第 ${round + 1} 轮（已完成 ${round} 轮）。`,
+        summaryParts.length > 0 ? `上一轮摘要：\n${summaryParts.join("\n\n")}` : "",
+        "如果任务已完成，请先输出总结，然后调用 finish 工具结束。如果还需要继续，请继续执行。",
+      ].filter(Boolean).join("\n");
+      runningMessages.push({ role: "user", content: roundHint });
     }
   }
 
