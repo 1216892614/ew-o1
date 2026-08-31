@@ -67,11 +67,23 @@ export interface ToolFocusThinking {
   done: boolean;
 }
 
+export interface ToolFocusFileMeta {
+  type: "file_meta";
+  fileId: string;
+  filename: string;
+  /** New filename if renamed */
+  newFilename?: string;
+  /** New category if recategorized */
+  newTag?: string;
+  success: boolean;
+}
+
 export type ToolFocus =
   | ToolFocusRead
   | ToolFocusEdit
   | ToolFocusSearch
-  | ToolFocusThinking;
+  | ToolFocusThinking
+  | ToolFocusFileMeta;
 
 /** Whether follow mode is active (right panel follows tool calls) */
 export const followModeAtom = atom<boolean>(true);
@@ -84,3 +96,11 @@ export const agentStreamingAtom = atom<boolean>(false);
 
 /** Whether the ask tool is allowed (user can toggle to prevent agent from pausing) */
 export const allowAskToolAtom = atom<boolean>(false);
+
+/* ── Chat session state (discriminated union) ──────────── */
+
+/** init = first load, auto-select latest; new = user wants blank chat; session = active session */
+export type ChatSessionState =
+  | { type: "init" }
+  | { type: "new" }
+  | { type: "session"; id: string };

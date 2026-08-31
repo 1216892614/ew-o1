@@ -7,6 +7,11 @@ import {
   addFileToNotebookToml,
   updateFileInNotebookToml,
   removeFileFromNotebookToml,
+  readNotebookTomlFromR2,
+  writeNotebookTomlToR2,
+  writeNoteContentToR2,
+  deleteNoteContentFromR2,
+  syncNotebookFromR2ToD1,
 } from "../../utils/r2Sync";
 import { upsertNoteToAiSearch, deleteNoteFromAiSearch } from "../../utils/aiSearchSync";
 import { recordSnapshot } from "../../utils/snapshot";
@@ -82,10 +87,49 @@ export const notesRouter = router({
       }),
     )
     .mutation(async ({ input, ctx }) => {
+      // Get old category name before rename
+      const [oldCat] = await ctx.db
+        .select({ name: categories.name })
+        .from(categories)
+        .where(eq(categories.id, input.id))
+        .limit(1);
+      const oldTag = oldCat?.name ?? "";
+
       await ctx.db
         .update(categories)
         .set({ name: input.name })
         .where(eq(categories.id, input.id));
+
+      // Sync R2 toml: read once, rename all matching tags, write once
+      const affectedNotes = await ctx.db
+        .select({ id: notes.id, notebookId: notes.notebookId })
+        .from(notes)
+        .where(eq(notes.categoryId, input.id));
+      if (affectedNotes.length > 0) {
+        // Group by notebookId (normally all same notebook, but be safe)
+        const byNotebook = new Map<string, string[]>();
+        for (const n of affectedNotes) {
+          const arr = byNotebook.get(n.notebookId) ?? [];
+          arr.push(n.id);
+          byNotebook.set(n.notebookId, arr);
+        }
+        for (const [notebookId, fileIds] of byNotebook) {
+          const toml = await readNotebookTomlFromR2(ctx.env.R2, notebookId);
+          const idSet = new Set(fileIds);
+          let changed = false;
+          for (const file of toml.files) {
+            if (idSet.has(file.id)) {
+              file.tag = input.name;
+              changed = true;
+            }
+          }
+          if (changed) {
+            toml.meta.updated_at = new Date();
+            await writeNotebookTomlToR2(ctx.env.R2, notebookId, toml);
+          }
+        }
+      }
+
       return { id: input.id };
     }),
 
@@ -141,6 +185,7 @@ export const notesRouter = router({
         id,
         tag,
       });
+      await writeNoteContentToR2(ctx.env.R2, input.notebookId, `${input.name}.md`, "");
 
       // Index into AI Search (fire-and-forget, new file has empty content)
       if (ctx.env.AI_SEARCH) {
@@ -159,7 +204,8 @@ export const notesRouter = router({
         action: "create_note",
         summary: `创建文件「${input.name}」`,
         source: "user",
-        afterData: { note: { id, notebookId: input.notebookId, name: input.name, content: "", categoryId: input.categoryId } },
+        beforeContent: "",
+        afterContent: "",
       });
 
       return { id };
@@ -218,6 +264,32 @@ export const notesRouter = router({
         }
       }
 
+      if (data.content !== undefined) {
+        const [noteForR2] = await ctx.db
+          .select({ notebookId: notes.notebookId, name: notes.name })
+          .from(notes)
+          .where(eq(notes.id, id))
+          .limit(1);
+        if (noteForR2) {
+          await writeNoteContentToR2(ctx.env.R2, noteForR2.notebookId, `${noteForR2.name}.md`, data.content);
+        }
+      }
+
+      if (data.name !== undefined && beforeNote) {
+        const oldName = beforeNote.name;
+        if (oldName !== data.name) {
+          const [noteForRename] = await ctx.db
+            .select({ notebookId: notes.notebookId, content: notes.content })
+            .from(notes)
+            .where(eq(notes.id, id))
+            .limit(1);
+          if (noteForRename) {
+            await deleteNoteContentFromR2(ctx.env.R2, noteForRename.notebookId, `${oldName}.md`);
+            await writeNoteContentToR2(ctx.env.R2, noteForRename.notebookId, `${data.name}.md`, noteForRename.content ?? "");
+          }
+        }
+      }
+
       // Re-index in AI Search when content or name changes
       const needsAiSearch = data.content !== undefined || data.name !== undefined;
       if (needsAiSearch && ctx.env.AI_SEARCH) {
@@ -237,22 +309,41 @@ export const notesRouter = router({
         }
       }
 
-      const [afterNote] = await ctx.db.select().from(notes).where(eq(notes.id, id)).limit(1);
       const changedFields: string[] = [];
       if (data.name !== undefined) changedFields.push(`重命名为「${data.name}」`);
       if (data.content !== undefined) changedFields.push("修改内容");
       if (data.categoryId !== undefined) changedFields.push("修改分类");
       if (data.active !== undefined) changedFields.push(data.active ? "启用" : "停用");
-      await recordSnapshot({
+
+      const snapshotParams: Parameters<typeof recordSnapshot>[0] = {
         db: ctx.db,
         notebookId: beforeNote!.notebookId,
         noteId: id,
         action: data.content !== undefined ? "update_content" : "update_meta",
         summary: changedFields.join("、") || "更新文件",
         source: "user",
-        beforeData: { note: beforeNote },
-        afterData: { note: afterNote },
-      });
+      };
+
+      if (data.content !== undefined) {
+        snapshotParams.beforeContent = beforeNote?.content ?? "";
+        snapshotParams.afterContent = data.content;
+      } else {
+        const metaDiff: Record<string, { before: unknown; after: unknown }> = {};
+        if (data.name !== undefined && beforeNote?.name !== data.name) {
+          metaDiff.name = { before: beforeNote?.name, after: data.name };
+        }
+        if (data.categoryId !== undefined && beforeNote?.categoryId !== data.categoryId) {
+          metaDiff.categoryId = { before: beforeNote?.categoryId, after: data.categoryId };
+        }
+        if (data.active !== undefined && beforeNote?.active !== data.active) {
+          metaDiff.active = { before: beforeNote?.active, after: data.active };
+        }
+        if (Object.keys(metaDiff).length > 0) {
+          snapshotParams.metaDiff = metaDiff;
+        }
+      }
+
+      await recordSnapshot(snapshotParams);
 
       return { id };
     }),
@@ -276,7 +367,7 @@ export const notesRouter = router({
         .set(updates)
         .where(inArray(notes.id, ids));
 
-      // Sync tag to R2 when categoryId changes
+      // Sync tag to R2 when categoryId changes — read once, mutate all, write once
       if (data.categoryId !== undefined) {
         let tag = "";
         if (data.categoryId) {
@@ -291,11 +382,27 @@ export const notesRouter = router({
           .select({ id: notes.id, notebookId: notes.notebookId })
           .from(notes)
           .where(inArray(notes.id, ids));
-        await Promise.all(
-          affectedNotes.map((n) =>
-            updateFileInNotebookToml(ctx.env.R2, n.notebookId, n.id, { tag }),
-          ),
-        );
+        const byNotebook = new Map<string, string[]>();
+        for (const n of affectedNotes) {
+          const arr = byNotebook.get(n.notebookId) ?? [];
+          arr.push(n.id);
+          byNotebook.set(n.notebookId, arr);
+        }
+        for (const [notebookId, fileIds] of byNotebook) {
+          const toml = await readNotebookTomlFromR2(ctx.env.R2, notebookId);
+          const idSet = new Set(fileIds);
+          let changed = false;
+          for (const file of toml.files) {
+            if (idSet.has(file.id)) {
+              file.tag = tag;
+              changed = true;
+            }
+          }
+          if (changed) {
+            toml.meta.updated_at = new Date();
+            await writeNotebookTomlToR2(ctx.env.R2, notebookId, toml);
+          }
+        }
       }
     }),
 
@@ -313,7 +420,9 @@ export const notesRouter = router({
 
       if (note) {
         await removeFileFromNotebookToml(ctx.env.R2, note.notebookId, input.id);
-        // Remove from AI Search index
+        if (fullNote) {
+          await deleteNoteContentFromR2(ctx.env.R2, note.notebookId, `${fullNote.name}.md`);
+        }
         if (ctx.env.AI_SEARCH) {
           deleteNoteFromAiSearch(ctx.env.AI_SEARCH, {
             notebookId: note.notebookId,
@@ -329,7 +438,8 @@ export const notesRouter = router({
           action: "delete_note",
           summary: `删除文件「${fullNote.name}」`,
           source: "user",
-          beforeData: { note: fullNote },
+          beforeContent: fullNote.content ?? "",
+          afterContent: "",
         });
       }
     }),
@@ -373,5 +483,12 @@ export const notesRouter = router({
         lastMessageAt: now,
       });
       return { id };
+    }),
+
+  initFromR2: publicProcedure
+    .input(z.object({ notebookId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      await syncNotebookFromR2ToD1(ctx.env.R2, ctx.db, input.notebookId);
+      return { success: true };
     }),
 });

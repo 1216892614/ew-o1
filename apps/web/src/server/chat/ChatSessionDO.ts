@@ -319,14 +319,15 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     }
 
     /* ── Multi-round agent loop with per-round AI Search ── */
-    const MAX_ROUNDS = 5;
     const outerStream = this.multiRoundAgentLoop({
       adapter,
       messages: llmMessages,
       systemPrompts,
       tools: filteredTools,
       modelOptions,
-      maxRounds: MAX_ROUNDS,
+      model: body.model,
+      contextLimit: body.modelParams?.contextLimit ?? 0,
+      compressMode: body.compressMode ?? "native",
       doAiSearch,
       aiSearchEntries,
     });
@@ -389,40 +390,9 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       .map((n) => `[${n.role}]: ${n.content.slice(0, 2000)}`)
       .join("\n\n");
 
-    const isDeepseek = model.startsWith("deepseek");
-    const apiKey = isDeepseek ? this.env.DEEPSEEK_AI_KEY : this.env.BIGBIGDOG_AI_KEY;
-    const baseURL = isDeepseek
-      ? `https://gateway.ai.cloudflare.com/v1/3244c8f91cd34317ce18652158e5853a/${this.env.CF_AI_GATEWAY_ID}/deepseek`
-      : "https://www.dogapi.cc/v1";
-
-    const summaryPrompt = `请将以下对话历史压缩为一段简洁的摘要，保留关键信息、决策和结论。摘要应该能让 AI 继续对话而不丢失重要上下文。用中文回复。\n\n---\n${conversationText}\n---\n\n请输出压缩后的对话摘要:`;
-
-    let summaryContent = "";
-    try {
-      const resp = await fetch(`${baseURL}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: "user", content: summaryPrompt }],
-          max_tokens: 4096,
-          stream: false,
-        }),
-      });
-      if (!resp.ok) {
-        return { success: false, summary: `压缩失败：API 返回 ${resp.status}` };
-      }
-      const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      summaryContent = data.choices?.[0]?.message?.content ?? "";
-    } catch {
+    const summaryContent = await this.summarizeConversation(conversationText, model);
+    if (!summaryContent) {
       return { success: false, summary: "压缩失败：无法生成摘要" };
-    }
-
-    if (!summaryContent.trim()) {
-      return { success: false, summary: "压缩失败：摘要为空" };
     }
 
     const oldNodeIds = path.map((n) => n.id);
@@ -481,10 +451,98 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     return new ReasoningChatCompletionsAdapter({ apiKey, baseURL }, model as any);
   }
 
+  /* ── Auto-compression helpers ─────────────────────────── */
+
+  /** Rough token estimate: ~3.5 chars per token for mixed CJK/English */
+  private estimateTokens(messages: { content: string }[], systemPrompts: string[]): number {
+    let chars = 0;
+    for (const m of messages) chars += m.content.length;
+    for (const s of systemPrompts) chars += s.length;
+    return Math.ceil(chars / 3.5);
+  }
+
+  /** Shared LLM summarization call — used by both compress() and in-flight auto-compression */
+  private async summarizeConversation(conversationText: string, model: string): Promise<string | null> {
+    const isDeepseek = model.startsWith("deepseek");
+    const apiKey = isDeepseek ? this.env.DEEPSEEK_AI_KEY : this.env.BIGBIGDOG_AI_KEY;
+    const baseURL = isDeepseek
+      ? `https://gateway.ai.cloudflare.com/v1/3244c8f91cd34317ce18652158e5853a/${this.env.CF_AI_GATEWAY_ID}/deepseek`
+      : "https://www.dogapi.cc/v1";
+
+    const summaryPrompt = `请将以下对话历史压缩为一段简洁的摘要，保留关键信息、决策和结论。摘要应该能让 AI 继续对话而不丢失重要上下文。用中文回复。\n\n---\n${conversationText}\n---\n\n请输出压缩后的对话摘要:`;
+
+    try {
+      const resp = await fetch(`${baseURL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: summaryPrompt }],
+          max_tokens: 4096,
+          stream: false,
+        }),
+      });
+      if (!resp.ok) return null;
+      const data = (await resp.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      return data.choices?.[0]?.message?.content?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Compress runningMessages in-place.
+   * "native" → currently unsupported, returns "unsupported" so caller can warn + fallback.
+   * "soft"   → LLM summarization, keeps last 2 messages.
+   * Returns "ok" | "unsupported" | "failed".
+   */
+  private async compressMessages(
+    runningMessages: { role: "user" | "assistant"; content: string }[],
+    model: string,
+    mode: "native" | "soft",
+  ): Promise<"ok" | "unsupported" | "failed"> {
+    if (mode === "native") {
+      return "unsupported";
+    }
+
+    if (runningMessages.length < 4) return "failed";
+
+    const keepCount = Math.min(2, runningMessages.length);
+    const toCompress = runningMessages.slice(0, runningMessages.length - keepCount);
+    const tail = runningMessages.slice(runningMessages.length - keepCount);
+
+    const conversationText = toCompress
+      .map((n) => `[${n.role}]: ${n.content.slice(0, 2000)}`)
+      .join("\n\n");
+
+    const summary = await this.summarizeConversation(conversationText, model);
+    if (!summary) return "failed";
+
+    runningMessages.length = 0;
+    runningMessages.push(
+      { role: "user", content: "[对话历史已自动压缩]\n\n" + summary },
+      { role: "assistant", content: "已了解之前的对话上下文，继续当前任务。" },
+      ...tail,
+    );
+    return "ok";
+  }
+
+  /** Check if an error indicates context length exceeded */
+  private isContextLengthError(err: unknown): boolean {
+    const msg = String(err);
+    return /context.*(length|limit|window|exceed|too long)|maximum.*token|token.*limit|max_tokens|请求体过大/i.test(msg);
+  }
+
   /**
    * Drive multiple single-pass chat() rounds, injecting fresh AI Search
    * context between rounds.  Round 1 uses the user query; subsequent rounds
    * use the assistant's latest text output as the search query.
+   *
+   * Auto-compresses conversation when context approaches the limit or
+   * when the model returns a context-length error.
    *
    * Yields every StreamChunk from each inner chat() call so the outer
    * teeAndPersist wrapper can forward them to the client unchanged.
@@ -495,17 +553,19 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     systemPrompts: string[];
     tools: AnyTool[];
     modelOptions: Record<string, unknown>;
-    maxRounds: number;
+    model: string;
+    contextLimit: number;
+    compressMode: "native" | "soft";
     doAiSearch: (query: string, round: number) => Promise<string | null>;
     aiSearchEntries: AiSearchEntry[];
   }): AsyncIterable<StreamChunk> {
-    const { adapter, messages, systemPrompts, tools, modelOptions, maxRounds, doAiSearch, aiSearchEntries } = opts;
+    const { adapter, messages, systemPrompts, tools, modelOptions, model, contextLimit, compressMode, doAiSearch, aiSearchEntries } = opts;
 
     const runningMessages = [...messages];
     const baseSystemPrompts = [...systemPrompts];
     let prevRoundHadToolCalls = false;
 
-    for (let round = 1; round <= maxRounds; round++) {
+    for (let round = 1; ; round++) {
       if (this.finishCalled) break;
 
       let roundSystemPrompts = [...baseSystemPrompts];
@@ -536,27 +596,92 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
         }
       }
 
-      const innerStream = chat({
-        adapter: adapter as Parameters<typeof chat>[0]["adapter"],
-        messages: runningMessages,
-        systemPrompts: roundSystemPrompts.length > 0 ? roundSystemPrompts : undefined,
-        tools,
-        agentLoopStrategy: ({ iterationCount }) => iterationCount < 5 && !this.finishCalled,
-        modelOptions: modelOptions as never,
-      });
+      /* ── Auto-compress helper: respect mode, native→soft fallback with warning ── */
+      const tryCompress = async (): Promise<{ ok: boolean; warning?: string }> => {
+        let result = await this.compressMessages(runningMessages, model, compressMode);
+        if (result === "unsupported") {
+          result = await this.compressMessages(runningMessages, model, "soft");
+          if (result === "ok") return { ok: true, warning: "当前模型不支持原生压缩，已回退到软压缩" };
+          return { ok: false, warning: "当前模型不支持原生压缩，软压缩也失败了" };
+        }
+        return { ok: result === "ok" };
+      };
+
+      /* ── Proactive compression: check before sending to model ── */
+      if (contextLimit > 0) {
+        const estimated = this.estimateTokens(runningMessages, roundSystemPrompts);
+        if (estimated > contextLimit * 0.85) {
+          const cr = await tryCompress();
+          if (cr.warning) {
+            yield { type: "CUSTOM", name: "compression", value: { reason: "warning", message: cr.warning } } as unknown as StreamChunk;
+          }
+          if (cr.ok) {
+            yield { type: "CUSTOM", name: "compression", value: { reason: "proactive", estimatedTokens: estimated, limit: contextLimit } } as unknown as StreamChunk;
+          }
+        }
+      }
+
+      /* ── Run inner chat with reactive compression on error ── */
+      let retried = false;
+      const runRound = async function* (self: ChatSessionDO) {
+        const innerStream = chat({
+          adapter: adapter as Parameters<typeof chat>[0]["adapter"],
+          messages: runningMessages,
+          systemPrompts: roundSystemPrompts.length > 0 ? roundSystemPrompts : undefined,
+          tools,
+          agentLoopStrategy: () => !self.finishCalled,
+          modelOptions: modelOptions as never,
+        });
+
+        for await (const chunk of innerStream) {
+          yield chunk;
+        }
+      };
 
       let roundAssistantText = "";
       let hadToolCalls = false;
 
-      for await (const chunk of innerStream) {
-        const type = chunk.type as string;
-        if (type === "TEXT_MESSAGE_CONTENT") {
-          roundAssistantText += ((chunk as Record<string, unknown>).delta ?? "") as string;
+      try {
+        for await (const chunk of runRound(this)) {
+          const type = chunk.type as string;
+          if (type === "TEXT_MESSAGE_CONTENT") {
+            roundAssistantText += ((chunk as Record<string, unknown>).delta ?? "") as string;
+          }
+          if (type === "TOOL_CALL_START") {
+            hadToolCalls = true;
+          }
+          yield chunk;
         }
-        if (type === "TOOL_CALL_START") {
-          hadToolCalls = true;
+      } catch (err) {
+        /* ── Reactive compression: model rejected due to context length ── */
+        if (!retried && this.isContextLengthError(err)) {
+          retried = true;
+          const cr = await tryCompress();
+          if (cr.warning) {
+            yield { type: "CUSTOM", name: "compression", value: { reason: "warning", message: cr.warning } } as unknown as StreamChunk;
+          }
+          if (cr.ok) {
+            yield { type: "CUSTOM", name: "compression", value: { reason: "reactive", error: String(err).slice(0, 200) } } as unknown as StreamChunk;
+
+            // Retry the round with compressed messages
+            roundAssistantText = "";
+            hadToolCalls = false;
+            for await (const chunk of runRound(this)) {
+              const type = chunk.type as string;
+              if (type === "TEXT_MESSAGE_CONTENT") {
+                roundAssistantText += ((chunk as Record<string, unknown>).delta ?? "") as string;
+              }
+              if (type === "TOOL_CALL_START") {
+                hadToolCalls = true;
+              }
+              yield chunk;
+            }
+          } else {
+            throw err;
+          }
+        } else {
+          throw err;
         }
-        yield chunk;
       }
 
       if (roundAssistantText) {
@@ -564,7 +689,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       }
 
       prevRoundHadToolCalls = hadToolCalls;
-      if (!hadToolCalls || this.finishCalled) break;
+      if (this.finishCalled) break;
     }
   }
 

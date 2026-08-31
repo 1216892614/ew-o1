@@ -329,8 +329,7 @@ export function TimeMachineModal({ notebookId, onClose }: TimeMachineModalProps)
                 <div className="flex-1 overflow-y-auto p-4">
                   <SnapshotDiffView
                     action={detail.action}
-                    beforeData={detail.beforeData}
-                    afterData={detail.afterData}
+                    diffData={detail.diffData}
                   />
                 </div>
               </div>
@@ -347,245 +346,141 @@ export function TimeMachineModal({ notebookId, onClose }: TimeMachineModalProps)
   );
 }
 
-/** Renders a diff-like view of before/after snapshot data */
+
 function SnapshotDiffView({
   action,
-  beforeData,
-  afterData,
+  diffData,
 }: {
   action: string;
-  beforeData: unknown;
-  afterData: unknown;
+  diffData: string | null;
 }) {
-  const before = beforeData as Record<string, unknown> | null;
-  const after = afterData as Record<string, unknown> | null;
-  const beforeNote = (before?.note ?? null) as Record<string, unknown> | null;
-  const afterNote = (after?.note ?? null) as Record<string, unknown> | null;
-
-  // Content diff
-  const beforeContent = (beforeNote?.content as string) ?? "";
-  const afterContent = (afterNote?.content as string) ?? "";
-  const beforeLines = beforeContent.split("\n");
-  const afterLines = afterContent.split("\n");
-
-  // Meta changes
-  const metaChanges: { label: string; before: string; after: string }[] = [];
-  if (beforeNote && afterNote) {
-    if (beforeNote.name !== afterNote.name) {
-      metaChanges.push({
-        label: "文件名",
-        before: (beforeNote.name as string) ?? "",
-        after: (afterNote.name as string) ?? "",
-      });
-    }
-    if (beforeNote.categoryId !== afterNote.categoryId) {
-      metaChanges.push({
-        label: "分类",
-        before: (beforeNote.categoryId as string) ?? "(无)",
-        after: (afterNote.categoryId as string) ?? "(无)",
-      });
-    }
-    if (beforeNote.active !== afterNote.active) {
-      metaChanges.push({
-        label: "状态",
-        before: beforeNote.active ? "启用" : "停用",
-        after: afterNote.active ? "启用" : "停用",
-      });
-    }
-  }
-
-  const hasContentChange = beforeContent !== afterContent;
-  const hasMetaChange = metaChanges.length > 0;
-
-  if (action === "create_note") {
+  if (!diffData) {
     return (
-      <div className="space-y-3">
-        <div className="badge badge-success badge-sm gap-1">新建</div>
-        {afterNote && (
-          <div className="text-sm">
-            <div className="text-base-content/50 mb-1">文件名: {afterNote.name as string}</div>
-            {afterContent && (
-              <pre className="bg-success/10 p-3 rounded-lg text-xs overflow-x-auto whitespace-pre-wrap">
-                {afterContent}
-              </pre>
-            )}
-          </div>
-        )}
+      <div className="text-sm text-base-content/40 text-center py-8">
+        无变更内容
       </div>
     );
   }
 
-  if (action === "delete_note") {
+  const isUnifiedDiff = diffData.startsWith("---") || diffData.includes("@@");
+
+  if (isUnifiedDiff) {
+    return <UnifiedDiffView action={action} patch={diffData} />;
+  }
+
+  try {
+    const meta = JSON.parse(diffData) as Record<
+      string,
+      { before: unknown; after: unknown }
+    >;
+    const entries = Object.entries(meta);
+    if (entries.length === 0) {
+      return (
+        <div className="text-sm text-base-content/40 text-center py-8">
+          无变更内容
+        </div>
+      );
+    }
+
+    const FIELD_LABELS: Record<string, string> = {
+      name: "文件名",
+      tag: "分类",
+      categoryId: "分类",
+      active: "状态",
+    };
+
     return (
-      <div className="space-y-3">
-        <div className="badge badge-error badge-sm gap-1">已删除</div>
-        {beforeNote && (
-          <div className="text-sm">
-            <div className="text-base-content/50 mb-1">文件名: {beforeNote.name as string}</div>
-            {beforeContent && (
-              <pre className="bg-error/10 p-3 rounded-lg text-xs overflow-x-auto whitespace-pre-wrap">
-                {beforeContent}
-              </pre>
-            )}
-          </div>
-        )}
+      <div>
+        <div className="text-xs font-medium text-base-content/50 mb-2">
+          属性变更
+        </div>
+        <div className="space-y-1">
+          {entries.map(([key, change]) => (
+            <div key={key} className="flex items-center gap-2 text-sm">
+              <span className="text-base-content/50 w-16">
+                {FIELD_LABELS[key] ?? key}:
+              </span>
+              <span className="line-through text-error/70">
+                {String(change.before ?? "(无)")}
+              </span>
+              <span>→</span>
+              <span className="text-success">
+                {String(change.after ?? "(无)")}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     );
+  } catch {
+    return (
+      <pre className="bg-base-200 p-3 rounded-lg text-xs overflow-x-auto whitespace-pre-wrap">
+        {diffData}
+      </pre>
+    );
   }
+}
+
+function UnifiedDiffView({ action, patch }: { action: string; patch: string }) {
+  const lines = patch.split("\n");
+
+  const isBadgeAction =
+    action === "create_note" || action === "delete_note" || action === "revert";
+  const badgeClass =
+    action === "create_note"
+      ? "badge-success"
+      : action === "delete_note"
+        ? "badge-error"
+        : "badge-warning";
+  const badgeLabel =
+    action === "create_note"
+      ? "新建"
+      : action === "delete_note"
+        ? "已删除"
+        : "回溯";
 
   return (
-    <div className="space-y-4">
-      {/* Meta changes */}
-      {hasMetaChange && (
-        <div>
-          <div className="text-xs font-medium text-base-content/50 mb-2">属性变更</div>
-          <div className="space-y-1">
-            {metaChanges.map((change) => (
-              <div
-                key={change.label}
-                className="flex items-center gap-2 text-sm"
-              >
-                <span className="text-base-content/50 w-12">{change.label}:</span>
-                <span className="line-through text-error/70">{change.before}</span>
-                <span>→</span>
-                <span className="text-success">{change.after}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+    <div className="space-y-3">
+      {isBadgeAction && (
+        <div className={`badge ${badgeClass} badge-sm gap-1`}>{badgeLabel}</div>
       )}
-
-      {/* Content diff */}
-      {hasContentChange && (
-        <div>
-          <div className="text-xs font-medium text-base-content/50 mb-2">内容变更</div>
-          <div className="bg-base-200 rounded-lg overflow-hidden text-xs font-mono">
-            {computeSimpleDiff(beforeLines, afterLines).map((line, i) => (
+      <div className="text-xs font-medium text-base-content/50 mb-2">
+        内容变更
+      </div>
+      <div className="bg-base-200 rounded-lg overflow-hidden text-xs font-mono">
+        {lines.map((line, i) => {
+          if (line.startsWith("---") || line.startsWith("+++")) return null;
+          if (line.startsWith("@@")) {
+            return (
               <div
                 key={i}
-                className={`px-3 py-0.5 ${
-                  line.type === "add"
-                    ? "bg-success/15 text-success"
-                    : line.type === "remove"
-                      ? "bg-error/15 text-error"
-                      : ""
-                }`}
+                className="px-3 py-0.5 bg-info/10 text-info/70 select-none"
               >
-                <span className="inline-block w-5 text-right mr-2 text-base-content/30 select-none">
-                  {line.type === "add" ? "+" : line.type === "remove" ? "-" : " "}
-                </span>
-                {line.text}
+                {line}
               </div>
-            ))}
-          </div>
-        </div>
-      )}
+            );
+          }
 
-      {!hasContentChange && !hasMetaChange && (
-        <div className="text-sm text-base-content/40 text-center py-8">
-          无可视化差异
-        </div>
-      )}
+          const isAdd = line.startsWith("+");
+          const isRemove = line.startsWith("-");
+          const colorClass = isAdd
+            ? "bg-success/15 text-success"
+            : isRemove
+              ? "bg-error/15 text-error"
+              : "";
+          const prefix = isAdd ? "+" : isRemove ? "-" : " ";
+          const text = isAdd || isRemove ? line.slice(1) : line;
+
+          return (
+            <div key={i} className={`px-3 py-0.5 ${colorClass}`}>
+              <span className="inline-block w-5 text-right mr-2 text-base-content/30 select-none">
+                {prefix}
+              </span>
+              {text}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
-}
-
-interface DiffLine {
-  type: "add" | "remove" | "same";
-  text: string;
-}
-
-/** Simple line-by-line diff (no LCS, just sequential comparison). Good enough for preview. */
-function computeSimpleDiff(before: string[], after: string[]): DiffLine[] {
-  const result: DiffLine[] = [];
-  const maxLen = Math.max(before.length, after.length);
-
-  // Use a simple LCS-like approach for small files, fall back to sequential for large
-  if (maxLen > 500) {
-    // Sequential comparison for large files
-    let i = 0;
-    let j = 0;
-    while (i < before.length && j < after.length) {
-      if (before[i] === after[j]) {
-        result.push({ type: "same", text: before[i] });
-        i++;
-        j++;
-      } else {
-        result.push({ type: "remove", text: before[i] });
-        i++;
-        // Try to catch up
-        if (j < after.length && (i >= before.length || before[i] === after[j])) {
-          // don't skip
-        } else {
-          result.push({ type: "add", text: after[j] });
-          j++;
-        }
-      }
-    }
-    while (i < before.length) {
-      result.push({ type: "remove", text: before[i++] });
-    }
-    while (j < after.length) {
-      result.push({ type: "add", text: after[j++] });
-    }
-    return result;
-  }
-
-  // Simple LCS for small files
-  const lcs = computeLCS(before, after);
-  let bi = 0;
-  let ai = 0;
-  for (const common of lcs) {
-    while (bi < before.length && before[bi] !== common) {
-      result.push({ type: "remove", text: before[bi++] });
-    }
-    while (ai < after.length && after[ai] !== common) {
-      result.push({ type: "add", text: after[ai++] });
-    }
-    result.push({ type: "same", text: common });
-    bi++;
-    ai++;
-  }
-  while (bi < before.length) {
-    result.push({ type: "remove", text: before[bi++] });
-  }
-  while (ai < after.length) {
-    result.push({ type: "add", text: after[ai++] });
-  }
-  return result;
-}
-
-/** Compute Longest Common Subsequence (limited to ~500 lines for performance) */
-function computeLCS(a: string[], b: string[]): string[] {
-  const m = a.length;
-  const n = b.length;
-  // dp[i][j] = length of LCS of a[0..i-1] and b[0..j-1]
-  const dp: number[][] = Array.from({ length: m + 1 }, () =>
-    new Array<number>(n + 1).fill(0),
-  );
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (a[i - 1] === b[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
-  }
-  // Backtrack
-  const result: string[] = [];
-  let i = m;
-  let j = n;
-  while (i > 0 && j > 0) {
-    if (a[i - 1] === b[j - 1]) {
-      result.unshift(a[i - 1]);
-      i--;
-      j--;
-    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
-      i--;
-    } else {
-      j--;
-    }
-  }
-  return result;
 }

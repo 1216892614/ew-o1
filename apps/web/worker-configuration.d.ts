@@ -13,6 +13,7 @@ interface CloudflareBindings {
   CF_AI_GATEWAY_ID: string;
   BROWSER: BrowserRun;
   SEARXNG: DurableObjectNamespace<import("./src/server/searxng/SearXNG").SearXNG>;
+  SHARE_KV: KVNamespace;
 }
 
 declare module "cloudflare:workers" {

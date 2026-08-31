@@ -165,6 +165,17 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
                       {lastToolFocus.results.length}
                     </span>
                   </>
+                ) : lastToolFocus.type === "file_meta" ? (
+                  <>
+                    <PencilSimple size={12} className="inline mr-1" />
+                    {lastToolFocus.newFilename ??
+                      lastToolFocus.fileId.slice(0, 8)}
+                    {lastToolFocus.newTag && (
+                      <span className="ml-1 badge badge-xs badge-outline">
+                        {lastToolFocus.newTag}
+                      </span>
+                    )}
+                  </>
                 ) : (
                   <>
                     {"filename" in lastToolFocus &&
@@ -506,6 +517,39 @@ function FollowModeContent({
         </div>
         <div className="prose prose-sm max-w-none text-base-content/60 [&_pre]:bg-base-200 [&_pre]:text-base-content/80 [&_code]:text-base-content/80 whitespace-pre-wrap font-mono text-xs leading-relaxed">
           {focus.content || "..."}
+        </div>
+      </div>
+    );
+  }
+
+  if (focus.type === "file_meta") {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 px-6">
+        <div
+          className={`flex items-center gap-2 text-lg ${focus.success ? "text-success" : "text-error"}`}
+        >
+          {focus.success ? <PencilSimple size={24} /> : <X size={24} />}
+          <span className="font-medium">
+            {focus.success ? "文件信息已更新" : "更新失败"}
+          </span>
+        </div>
+        <div className="flex flex-col gap-2 text-sm text-base-content/60">
+          {focus.newFilename && (
+            <div className="flex items-center gap-2">
+              <span className="text-base-content/40">重命名:</span>
+              <span className="font-medium text-base-content/80">
+                {focus.newFilename}
+              </span>
+            </div>
+          )}
+          {focus.newTag && (
+            <div className="flex items-center gap-2">
+              <span className="text-base-content/40">分类:</span>
+              <span className="badge badge-sm badge-outline">
+                {focus.newTag}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     );

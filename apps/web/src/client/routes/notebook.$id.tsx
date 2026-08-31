@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { PencilSimple, X, FolderSimplePlus, MagnifyingGlass } from "@phosphor-icons/react";
+import { PencilSimple, X, FolderSimplePlus, MagnifyingGlass, ShareNetwork } from "@phosphor-icons/react";
 import { Provider as JotaiProvider } from "jotai";
 import { DndContext, DragEndEvent, DragOverlay, DragStartEvent, PointerSensor, KeyboardSensor, useSensor, useSensors, pointerWithin } from "@dnd-kit/core";
 import { trpc } from "@/client/lib/trpc";
@@ -12,8 +12,9 @@ import { ModelSelector, type ModelConfig, getDefaultModelConfig } from "@/client
 import { SessionSelector } from "@/client/components/notebook/SessionSelector";
 import { NotebookMetaModal } from "@/client/components/notebook/NotebookMetaModal";
 import { TimeMachineModal } from "@/client/components/notebook/TimeMachineModal";
+import { ShareModal } from "@/client/components/notebook/ShareModal";
 import { useAtom, useSetAtom } from "jotai";
-import { openedNoteIdAtom, selectedNoteIdsAtom } from "@/client/components/notebook/state";
+import { openedNoteIdAtom, selectedNoteIdsAtom, type ChatSessionState } from "@/client/components/notebook/state";
 import { z } from "zod";
 
 const notebookSearchSchema = z.object({
@@ -36,10 +37,30 @@ function NotebookPage() {
 }
 
 function NotebookPageInner({ notebookId }: { notebookId: string }) {
-  const { data: notebook } = trpc.notes.getNotebook.useQuery({ id: notebookId });
-  const { data: notesList } = trpc.notes.listNotes.useQuery({ notebookId });
-  const batchUpdate = trpc.notes.batchUpdateNotes.useMutation();
   const utils = trpc.useUtils();
+  const initFromR2Mutation = trpc.notes.initFromR2.useMutation();
+  const [r2Initialized, setR2Initialized] = useState(false);
+
+  useEffect(() => {
+    initFromR2Mutation.mutate(
+      { notebookId },
+      {
+        onSuccess: () => {
+          setR2Initialized(true);
+          utils.notes.listNotes.invalidate();
+          utils.notes.listCategories.invalidate();
+          utils.notes.getNotebook.invalidate();
+        },
+        onError: () => {
+          setR2Initialized(true);
+        },
+      },
+    );
+  }, [notebookId]);
+
+  const { data: notebook } = trpc.notes.getNotebook.useQuery({ id: notebookId }, { enabled: r2Initialized });
+  const { data: notesList } = trpc.notes.listNotes.useQuery({ notebookId }, { enabled: r2Initialized });
+  const batchUpdate = trpc.notes.batchUpdateNotes.useMutation();
   const navigate = Route.useNavigate();
 
   const { leaf: leafFromUrl } = Route.useSearch();
@@ -48,8 +69,9 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [showSessionSelector, setShowSessionSelector] = useState(false);
   const [showTimeMachine, setShowTimeMachine] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
   const [modelConfig, setModelConfig] = useState<ModelConfig>(getDefaultModelConfig());
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [sessionState, setSessionState] = useState<ChatSessionState>({ type: "init" });
   const [draggedNoteIds, setDraggedNoteIds] = useState<string[]>([]);
   const [droppedNoteIdsForChat, setDroppedNoteIdsForChat] = useState<string[]>([]);
   const [pendingCategoryNoteIds, setPendingCategoryNoteIds] = useState<string[] | null>(null);
@@ -84,7 +106,7 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
   }
 
   const createCategory = trpc.notes.createCategory.useMutation();
-  const { data: categoriesList = [] } = trpc.notes.listCategories.useQuery({ notebookId });
+  const { data: categoriesList = [] } = trpc.notes.listCategories.useQuery({ notebookId }, { enabled: r2Initialized });
 
   function handleDragEnd(event: DragEndEvent) {
     const { over } = event;
@@ -163,7 +185,7 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
     setPendingCategoryNoteIds(null);
   }
 
-  if (!notebook) {
+  if (!r2Initialized || !notebook) {
     return (
       <div className="flex-1 flex items-center justify-center">
         <span className="loading loading-spinner loading-lg" />
@@ -195,6 +217,19 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
           document.getElementById("header-center")!,
         )}
 
+      {document.getElementById("header-actions") &&
+        createPortal(
+          <button
+            type="button"
+            onClick={() => setShowShareModal(true)}
+            className="btn btn-ghost btn-sm btn-square"
+            title="分享"
+          >
+            <ShareNetwork size={18} />
+          </button>,
+          document.getElementById("header-actions")!,
+        )}
+
       <div className="flex flex-1 overflow-hidden">
           {/* Left: Notes Sidebar */}
           <div className="w-80 border-r border-base-300 flex flex-col overflow-hidden">
@@ -209,8 +244,8 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
               notebookDescription={notebook.description ?? ""}
               modelConfig={modelConfig}
               setModelConfig={setModelConfig}
-              currentSessionId={currentSessionId}
-              setCurrentSessionId={setCurrentSessionId}
+              sessionState={sessionState}
+              setSessionState={setSessionState}
               leafId={leafId}
               setLeafId={setLeafId}
               onOpenModelSelector={() => setShowModelSelector(true)}
@@ -266,9 +301,9 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
       {showSessionSelector && (
         <SessionSelector
           notebookId={notebookId}
-          currentSessionId={currentSessionId ?? undefined}
+          currentSessionId={sessionState.type === "session" ? sessionState.id : undefined}
           onSelect={(sid) => {
-            setCurrentSessionId(sid);
+            setSessionState({ type: "session", id: sid });
             setShowSessionSelector(false);
           }}
           onClose={() => setShowSessionSelector(false)}
@@ -278,6 +313,12 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
         <TimeMachineModal
           notebookId={notebookId}
           onClose={() => setShowTimeMachine(false)}
+        />
+      )}
+      {showShareModal && (
+        <ShareModal
+          notebookId={notebookId}
+          onClose={() => setShowShareModal(false)}
         />
       )}
     </DndContext>

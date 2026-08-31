@@ -2,6 +2,9 @@ import { z } from "zod";
 import { applyPatch } from "diff";
 import type { AnyTool } from "@tanstack/ai";
 import { upsertNoteToAiSearch, searchNotebook } from "../utils/aiSearchSync";
+import { writeNoteContentToR2, deleteNoteContentFromR2, updateFileInNotebookToml } from "../utils/r2Sync";
+import dbFactory from "@lib/db";
+import { recordSnapshot } from "../utils/snapshot";
 import { getContainer } from "@cloudflare/containers";
 
 function tool<TInput extends z.ZodType, TOutput extends z.ZodType>(def: {
@@ -96,6 +99,7 @@ type SearchResult = {
 export function createAgentTools(params: CreateAgentToolsParams) {
   const { env, notebookId, contentHashMap, askResolverRef, finishFlagRef, activeNoteIds } = params;
   const db = env.DB;
+  const drizzleDb = dbFactory(db);
 
   /* ── Category queries ─────────────────────────────────── */
 
@@ -250,9 +254,13 @@ export function createAgentTools(params: CreateAgentToolsParams) {
         "Search:\n" +
         "  - Default mode 'content': AI semantic search returning relevant chunks with line numbers and relevance score.\n" +
         "  - Mode 'name': filename lookup.\n" +
+        "Batch search:\n" +
+        '  - Use "|" to separate multiple queries for batch search, e.g. "react hooks | state management | useEffect".\n' +
+        "  - Each sub-query runs independently; results are merged and deduplicated.\n" +
+        "  - Same file may appear multiple times with different matched chunks.\n" +
         "Results include files (type 'file') and categories (type 'category').",
       inputSchema: z.object({
-        query: z.string().describe("Search query, category browse pattern, or keywords"),
+        query: z.string().describe("Search query, category browse pattern, or keywords. Use '|' to batch multiple queries."),
         mode: z
           .enum(["content", "name"])
           .optional()
@@ -272,8 +280,24 @@ export function createAgentTools(params: CreateAgentToolsParams) {
         }
 
         const mode = args.mode ?? "content";
-        const results = mode === "name" ? await searchByName(query) : await searchByContent(query);
-        return { results };
+        const subQueries = query.split("|").map((q) => q.trim()).filter(Boolean);
+        const searchFn = mode === "name" ? searchByName : searchByContent;
+
+        const allResults = await Promise.all(subQueries.map((q) => searchFn(q)));
+        const merged = allResults.flat();
+
+        // Dedup by file_id + summary (same file with different chunks kept)
+        const seen = new Set<string>();
+        const deduped: SearchResult[] = [];
+        for (const r of merged) {
+          const key = `${r.file_id}\0${r.summary}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(r);
+          }
+        }
+
+        return { results: deduped };
       },
     }),
 
@@ -343,7 +367,13 @@ export function createAgentTools(params: CreateAgentToolsParams) {
         const check = await verifyHash(db, args.file_id, contentHashMap);
         if (!check.ok) return { success: false, file_id: args.file_id, error: check.error };
 
+        let oldFileName: string | undefined;
         if (args.new_filename) {
+          const existing = await db
+            .prepare("SELECT name FROM notes WHERE id = ?")
+            .bind(args.file_id)
+            .first<{ name: string }>();
+          oldFileName = existing?.name;
           await db.prepare("UPDATE notes SET name = ? WHERE id = ?").bind(args.new_filename, args.file_id).run();
         }
 
@@ -386,6 +416,44 @@ export function createAgentTools(params: CreateAgentToolsParams) {
               content: meta.content ?? "",
             }).catch(() => {});
           }
+        }
+
+        const noteData = await db
+          .prepare("SELECT name, content, notebook_id FROM notes WHERE id = ?")
+          .bind(args.file_id)
+          .first<{ name: string; content: string; notebook_id: string }>();
+        if (noteData) {
+          if (args.new_filename || args.new_tag !== undefined) {
+            const tomlUpdates: Partial<{ filename: string; tag: string }> = {};
+            if (args.new_filename) tomlUpdates.filename = `${args.new_filename}.md`;
+            if (args.new_tag !== undefined) tomlUpdates.tag = args.new_tag === "Archived" ? "" : args.new_tag;
+            await updateFileInNotebookToml(env.R2, noteData.notebook_id, args.file_id, tomlUpdates);
+          }
+          if (args.new_filename && oldFileName && oldFileName !== args.new_filename) {
+            await deleteNoteContentFromR2(env.R2, noteData.notebook_id, `${oldFileName}.md`);
+            await writeNoteContentToR2(env.R2, noteData.notebook_id, `${args.new_filename}.md`, noteData.content ?? "");
+          }
+        }
+
+        const metaDiff: Record<string, { before: unknown; after: unknown }> = {};
+        if (args.new_filename && oldFileName && oldFileName !== args.new_filename) {
+          metaDiff.name = { before: oldFileName, after: args.new_filename };
+        }
+        if (args.new_tag) {
+          metaDiff.tag = { before: null, after: args.new_tag };
+        }
+        if (Object.keys(metaDiff).length > 0) {
+          await recordSnapshot({
+            db: drizzleDb,
+            notebookId,
+            noteId: args.file_id,
+            action: "agent_edit_meta",
+            summary: args.new_filename ? `AI 重命名为 ${args.new_filename}` : `AI 修改分类`,
+            source: "agent",
+            sessionName: null,
+            toolName: "edit_file",
+            metaDiff,
+          });
         }
 
         return { success: true, file_id: args.file_id };
@@ -440,6 +508,14 @@ export function createAgentTools(params: CreateAgentToolsParams) {
           .bind(newContent, wordCount, now, args.file_id)
           .run();
 
+        const noteMeta = await db
+          .prepare("SELECT name, notebook_id FROM notes WHERE id = ?")
+          .bind(args.file_id)
+          .first<{ name: string; notebook_id: string }>();
+        if (noteMeta) {
+          await writeNoteContentToR2(env.R2, noteMeta.notebook_id, `${noteMeta.name}.md`, newContent);
+        }
+
         if (env.AI_SEARCH) {
           const meta = await db
             .prepare("SELECT name, notebook_id FROM notes WHERE id = ?")
@@ -453,6 +529,21 @@ export function createAgentTools(params: CreateAgentToolsParams) {
               content: newContent,
             }).catch(() => {});
           }
+        }
+
+        if (noteMeta) {
+          await recordSnapshot({
+            db: drizzleDb,
+            notebookId: noteMeta.notebook_id,
+            noteId: args.file_id,
+            action: "agent_edit_content",
+            summary: "AI 修改内容",
+            source: "agent",
+            sessionName: null,
+            toolName: "edit_content",
+            beforeContent: check.content,
+            afterContent: newContent,
+          });
         }
 
         return { success: true, file_id: args.file_id };

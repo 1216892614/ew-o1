@@ -4,14 +4,6 @@ import { eq, and, desc, gte, lte, inArray } from "drizzle-orm";
 import { publicProcedure, router } from "../init";
 import { revertToSnapshot } from "../../utils/snapshot";
 
-function parseJsonField(raw: string | null): unknown {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return raw;
-  }
-}
 
 export const timeMachineRouter = router({
   /**
@@ -53,8 +45,6 @@ export const timeMachineRouter = router({
           source: snapshots.source,
           sessionName: snapshots.sessionName,
           toolName: snapshots.toolName,
-          beforeData: snapshots.beforeData,
-          afterData: snapshots.afterData,
           revertTargetId: snapshots.revertTargetId,
           createdAt: snapshots.createdAt,
           noteName: notes.name,
@@ -80,8 +70,6 @@ export const timeMachineRouter = router({
         source: r.source,
         sessionName: r.sessionName,
         toolName: r.toolName,
-        beforeData: parseJsonField(r.beforeData),
-        afterData: parseJsonField(r.afterData),
         revertTargetId: r.revertTargetId,
         createdAt: r.createdAt.toISOString(),
       }));
@@ -105,8 +93,7 @@ export const timeMachineRouter = router({
           source: snapshots.source,
           sessionName: snapshots.sessionName,
           toolName: snapshots.toolName,
-          beforeData: snapshots.beforeData,
-          afterData: snapshots.afterData,
+          diffData: snapshots.diffData,
           revertTargetId: snapshots.revertTargetId,
           createdAt: snapshots.createdAt,
           noteName: notes.name,
@@ -128,8 +115,7 @@ export const timeMachineRouter = router({
         source: row.source,
         sessionName: row.sessionName,
         toolName: row.toolName,
-        beforeData: parseJsonField(row.beforeData),
-        afterData: parseJsonField(row.afterData),
+        diffData: row.diffData,
         revertTargetId: row.revertTargetId,
         createdAt: row.createdAt.toISOString(),
       };

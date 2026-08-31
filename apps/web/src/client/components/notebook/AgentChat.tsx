@@ -15,6 +15,8 @@ import {
   GearSix,
   Hourglass,
   Lightning,
+  LockSimple,
+  LockSimpleOpen,
   MagnifyingGlass,
   Paperclip,
   PaperPlaneRight,
@@ -64,6 +66,7 @@ import {
   agentStreamingAtom,
   allowAskToolAtom,
   lastToolFocusAtom,
+  type ChatSessionState,
 } from "./state";
 
 const FILE_MUTATING_TOOLS = new Set(["edit_file", "edit_content"]);
@@ -83,8 +86,8 @@ interface AgentChatProps {
   notebookDescription: string;
   modelConfig: ModelConfig;
   setModelConfig: (config: ModelConfig) => void;
-  currentSessionId: string | null;
-  setCurrentSessionId: (id: string | null) => void;
+  sessionState: ChatSessionState;
+  setSessionState: (s: ChatSessionState) => void;
   leafId: string | null;
   setLeafId: (id: string | null) => void;
   onOpenModelSelector: () => void;
@@ -123,8 +126,8 @@ export function AgentChat({
   notebookDescription,
   modelConfig,
   setModelConfig,
-  currentSessionId,
-  setCurrentSessionId,
+  sessionState,
+  setSessionState,
   leafId,
   setLeafId,
   onOpenModelSelector,
@@ -156,9 +159,14 @@ export function AgentChat({
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const isStuckToBottomRef = useRef(true);
+  const isProgrammaticScrollRef = useRef(false);
+  const [scrollLocked, setScrollLocked] = useState(true);
+  const [scrollLockVisible, setScrollLockVisible] = useState(false);
+  const scrollLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const skipLoadHistoryRef = useRef(false);
+  const loadHistoryAbortRef = useRef<AbortController | null>(null);
   const streamingAssistantRef = useRef<StreamingAssistant | null>(null);
   const setLastToolFocus = useSetAtom(lastToolFocusAtom);
   const setAgentStreaming = useSetAtom(agentStreamingAtom);
@@ -188,6 +196,7 @@ export function AgentChat({
 
   const utils = trpc.useUtils();
   const { data: sessions } = trpc.notes.listSessions.useQuery({ notebookId });
+  const currentSessionId = sessionState.type === "session" ? sessionState.id : null;
   const currentSession = sessions?.find((s) => s.id === currentSessionId);
   const createSessionMut = trpc.notes.createSession.useMutation({
     onSuccess: () => {
@@ -200,7 +209,8 @@ export function AgentChat({
   const _activePathIds = new Set(activePath.map((n) => n.id));
 
   function handleNewChat() {
-    setCurrentSessionId(null);
+    loadHistoryAbortRef.current?.abort();
+    setSessionState({ type: "new" });
     setLeafId(null);
     setAllNodes([]);
     setStreamingAssistant(null);
@@ -211,58 +221,73 @@ export function AgentChat({
 
   /* Auto-select latest session on first load */
   useEffect(() => {
-    if (currentSessionId || !sessions || sessions.length === 0) return;
-    setCurrentSessionId(sessions[0].id);
-  }, [sessions, setCurrentSessionId, currentSessionId]);
+    if (sessionState.type !== "init" || !sessions || sessions.length === 0) return;
+    setSessionState({ type: "session", id: sessions[0].id });
+  }, [sessions, sessionState]);
 
-  /* Load history */
+  const leafIdRef = useRef(leafId);
+  leafIdRef.current = leafId;
+
+  /** Restore ModelConfig from the last user node in loaded history */
+  const restoreModelConfig = useCallback(
+    (nodes: ChatNode[]) => {
+      const userNodes = nodes.filter((n): n is UserNode => n.role === "user");
+      if (userNodes.length === 0) return;
+      const last = userNodes.reduce((a, b) =>
+        a.createdAt > b.createdAt ? a : b,
+      );
+      const found = MODELS.find((m) => m.id === last.model);
+      if (!found) return;
+      const defaultMax = found.thinking ? 16384 : 8192;
+      const defaults = found.thinking
+        ? { thinkingLevel: "medium" as const, maxPerRound: defaultMax }
+        : { temperature: 0.7, topP: 1, maxPerRound: defaultMax };
+      const saved = last.modelParams;
+      setModelConfig({
+        model: found,
+        params: saved
+          ? { ...saved, maxPerRound: saved.maxPerRound ?? defaultMax }
+          : defaults,
+      });
+    },
+    [setModelConfig],
+  );
+
+  const loadHistory = useCallback(
+    async (nbId: string, sessionId: string) => {
+      loadHistoryAbortRef.current?.abort();
+      const ac = new AbortController();
+      loadHistoryAbortRef.current = ac;
+      try {
+        const response = await fetch(
+          `/api/chat/messages?notebookId=${encodeURIComponent(nbId)}&sessionId=${encodeURIComponent(sessionId)}`,
+          { signal: ac.signal },
+        );
+        if (!response.ok || ac.signal.aborted) return;
+        const data = (await response.json()) as ChatMessagesResponse;
+        if (ac.signal.aborted) return;
+        setAllNodes(data.nodes);
+        restoreModelConfig(data.nodes);
+        const currentLeafId = leafIdRef.current;
+        if (!currentLeafId || !data.nodes.find((n) => n.id === currentLeafId)) {
+          setLeafId(data.leafId);
+        }
+      } catch {
+        // silently fail (includes AbortError)
+      }
+    },
+    [restoreModelConfig, setLeafId],
+  );
+
+  /* Load history when session selected */
   useEffect(() => {
-    if (!currentSessionId || !notebookId) return;
+    if (sessionState.type !== "session" || !notebookId) return;
     if (skipLoadHistoryRef.current) {
       skipLoadHistoryRef.current = false;
       return;
     }
-    loadHistory(notebookId, currentSessionId);
-  }, [currentSessionId, notebookId, loadHistory]);
-
-  /** Restore ModelConfig from the last user node in loaded history */
-  function restoreModelConfig(nodes: ChatNode[]) {
-    const userNodes = nodes.filter((n): n is UserNode => n.role === "user");
-    if (userNodes.length === 0) return;
-    const last = userNodes.reduce((a, b) =>
-      a.createdAt > b.createdAt ? a : b,
-    );
-    const found = MODELS.find((m) => m.id === last.model);
-    if (!found) return;
-    const defaultMax = found.thinking ? 16384 : 8192;
-    const defaults = found.thinking
-      ? { thinkingLevel: "medium" as const, maxPerRound: defaultMax }
-      : { temperature: 0.7, topP: 1, maxPerRound: defaultMax };
-    const saved = last.modelParams;
-    setModelConfig({
-      model: found,
-      params: saved
-        ? { ...saved, maxPerRound: saved.maxPerRound ?? defaultMax }
-        : defaults,
-    });
-  }
-
-  async function loadHistory(nbId: string, sessionId: string) {
-    try {
-      const response = await fetch(
-        `/api/chat/messages?notebookId=${encodeURIComponent(nbId)}&sessionId=${encodeURIComponent(sessionId)}`,
-      );
-      if (!response.ok) return;
-      const data = (await response.json()) as ChatMessagesResponse;
-      setAllNodes(data.nodes);
-      restoreModelConfig(data.nodes);
-      if (!leafId || !data.nodes.find((n) => n.id === leafId)) {
-        setLeafId(data.leafId);
-      }
-    } catch {
-      // silently fail
-    }
-  }
+    loadHistory(notebookId, sessionState.id);
+  }, [sessionState, notebookId, loadHistory]);
 
   /* Note drop */
   const handleNoteDrop = useCallback((droppedIds: string[]) => {
@@ -281,19 +306,57 @@ export function AgentChat({
     }
   }, [droppedNoteIdsForChat, handleNoteDrop, clearDroppedNoteIds]);
 
-  /* Smart auto-scroll: only scroll to bottom when user hasn't scrolled away */
-  const handleChatScroll = useCallback(() => {
-    const el = chatScrollRef.current;
-    if (!el) return;
-    const threshold = 60;
-    isStuckToBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+  /* ── Scroll lock helpers ──────────────────────────────── */
+  const showLockIndicator = useCallback(() => {
+    setScrollLockVisible(true);
+    if (scrollLockTimerRef.current) clearTimeout(scrollLockTimerRef.current);
+    scrollLockTimerRef.current = setTimeout(() => setScrollLockVisible(false), 500);
   }, []);
 
+  /** Programmatic scroll-to-bottom — sets flag so onScroll won't unlock */
+  const scrollToBottom = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    isProgrammaticScrollRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    /* Reset after a tick — the scroll event fires synchronously or within rAF */
+    requestAnimationFrame(() => {
+      isProgrammaticScrollRef.current = false;
+    });
+  }, []);
+
+  /* onScroll: only user-initiated scrolls change lock state */
+  const handleChatScroll = useCallback(() => {
+    if (isProgrammaticScrollRef.current) return; /* ignore our own scrolls */
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = distFromBottom < 80;
+    const wasStuck = isStuckToBottomRef.current;
+    if (nearBottom && !wasStuck) {
+      /* User scrolled back to bottom → re-lock */
+      isStuckToBottomRef.current = true;
+      setScrollLocked(true);
+      showLockIndicator();
+    } else if (!nearBottom && wasStuck) {
+      /* User scrolled away → unlock */
+      isStuckToBottomRef.current = false;
+      setScrollLocked(false);
+      showLockIndicator();
+    }
+  }, [showLockIndicator]);
+
+  /* Auto-scroll during streaming when locked */
+  useEffect(() => {
+    if (!streamingAssistant || !isStuckToBottomRef.current) return;
+    scrollToBottom();
+  }, [streamingAssistant, scrollToBottom]);
+
+  /* Scroll to bottom on mount and when conversation path changes */
   useEffect(() => {
     if (!isStuckToBottomRef.current) return;
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, []);
+    scrollToBottom();
+  }, [activePath.length, scrollToBottom]);
 
   /* Upload files from chat input → auto-attach */
   const handleChatUpload = useCallback(
@@ -457,7 +520,7 @@ export function AgentChat({
         });
         sessionId = res.id;
         skipLoadHistoryRef.current = true;
-        setCurrentSessionId(sessionId);
+        setSessionState({ type: "session", id: sessionId });
       } catch {
         return;
       }
@@ -477,6 +540,7 @@ export function AgentChat({
       setShowAttachPopover(false);
     }
     isStuckToBottomRef.current = true;
+    setScrollLocked(true);
     setIsStreaming(true);
     setAgentStreaming(true);
 
@@ -513,13 +577,44 @@ export function AgentChat({
 
     try {
       const systemPrompt = [
-        `You are an AI assistant for the notebook "${notebookName}".`,
-        notebookDescription
-          ? `Notebook description: ${notebookDescription}`
-          : "",
+        `你是笔记本「${notebookName}」的 AI 研究助手。`,
+        notebookDescription ? `笔记本简介：${notebookDescription}` : "",
+        "",
+        "## Agent Loop 生命周期",
+        "",
+        "你运行在一个多轮 agent loop 中。每一轮你可以调用工具或输出文字。",
+        "循环流程：",
+        "1. 理解阶段 — 分析用户意图，规划行动",
+        "2. 检索阶段 — 用 search_file 搜索笔记、用 read_file 阅读文件、用 web_search / web_page_read 联网查询",
+        "3. 执行阶段 — 用 edit_file / edit_content 修改文件，或综合信息回答问题",
+        "4. 终结阶段 — 调用 finish 工具报告结果",
+        "",
+        "⚠️ 关键规则：",
+        "- 任务完成后 **必须** 调用 finish 工具。这是终止 agent loop 的唯一正确方式。如果不调用 finish，循环会永远继续。",
+        "- finish 的 message 参数是给用户的最终回复，应包含完整的回答或操作总结。",
+        "- 简单对话（打招呼、闲聊、直接回答的问题）也必须调用 finish，不要只输出文字。",
+        "- 需要中途向用户确认时，使用 ask 工具（会暂停循环等待回答）。",
+        "",
+        "## 工具使用指南",
+        "",
+        "- search_file：搜索笔记内容（语义搜索）或按文件名查找。query 为 \"*\" 列出所有分类。",
+        "- read_file：按 file_id 阅读文件，支持行号范围。编辑前必须先 read。",
+        "- edit_file：修改文件名或分类。",
+        "- edit_content：用 unified diff 格式修改文件内容。必须先 read_file 再编辑。",
+        "- web_search：联网搜索。",
+        "- web_page_read：阅读网页内容。",
+        "- ask：向用户提问并等待回答（阻塞式）。",
+        "- finish：**声明任务完成，终止循环**。每次对话必须以此结束。",
+        "",
+        "## 行为准则",
+        "",
+        "- 用中文回复（除非用户用其他语言）。",
+        "- 编辑文件前必须先 read_file 获取最新内容和 hash。",
+        "- 引用文件内容时标注文件名和行号。",
+        "- 搜索无结果时如实告知，不编造内容。",
       ]
-        .filter(Boolean)
-        .join(" ");
+        .filter((line) => line !== undefined)
+        .join("\n");
 
       const requestBody: ChatRequestBody = {
         sessionId,
@@ -533,6 +628,7 @@ export function AgentChat({
         systemPrompt,
         attachedFiles: attachedFiles.length > 0 ? attachedFiles : undefined,
         disabledTools: allowAskTool ? undefined : ["ask"],
+        compressMode,
       };
 
       const response = await fetch("/api/chat", {
@@ -847,6 +943,16 @@ export function AgentChat({
                           ),
                         });
                       }
+                    } else if (completedTc.name === "edit_file" && content) {
+                      const res = JSON.parse(content);
+                      setLastToolFocus({
+                        type: "file_meta",
+                        fileId: args.file_id ?? res.file_id ?? "",
+                        filename: args.file_id ?? "",
+                        newFilename: args.new_filename,
+                        newTag: args.new_tag,
+                        success: res.success ?? true,
+                      });
                     }
                   } catch {
                     // ignore parse failures
@@ -1151,11 +1257,28 @@ export function AgentChat({
       </div>
 
       {/* Chat Area */}
-      <div
-        ref={chatScrollRef}
-        onScroll={handleChatScroll}
-        className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-4"
-      >
+      <div className="relative flex-1 overflow-hidden">
+        {/* Scroll lock indicator */}
+        <div
+          className={`absolute top-2 left-2 z-20 flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium backdrop-blur-sm shadow-sm transition-opacity duration-300 pointer-events-none ${scrollLockVisible ? "opacity-100" : "opacity-0"} ${scrollLocked ? "bg-emerald-500/15 text-emerald-600" : "bg-amber-500/15 text-amber-600"}`}
+        >
+          {scrollLocked ? (
+            <>
+              <LockSimple size={12} weight="bold" />
+              <span>已锁定</span>
+            </>
+          ) : (
+            <>
+              <LockSimpleOpen size={12} weight="bold" />
+              <span>已解锁</span>
+            </>
+          )}
+        </div>
+        <div
+          ref={chatScrollRef}
+          onScroll={handleChatScroll}
+          className="h-full overflow-y-auto px-4 py-3 flex flex-col gap-4"
+        >
         {renderNodes.length === 0 && !streamingAssistant ? (
           <div className="flex-1 flex flex-col items-center justify-center text-base-content/40 gap-2">
             <ChatCircleDots size={48} weight="thin" />
@@ -1195,6 +1318,7 @@ export function AgentChat({
           })
         )}
         <div ref={chatEndRef} />
+        </div>
       </div>
 
       {/* Drop overlay */}
@@ -1591,21 +1715,24 @@ type TimelineSegment =
 
 function splitTimelineSegments(timeline: TimelineEntry[]): TimelineSegment[] {
   const segments: TimelineSegment[] = [];
-  let trackBuf: TimelineEntry[] = [];
+  let pendingTrack: TimelineEntry[] = [];
 
   for (const entry of timeline) {
     if (entry.kind === "text") {
-      if (trackBuf.length > 0) {
-        segments.push({ kind: "track", entries: trackBuf });
-        trackBuf = [];
+      // Flush any accumulated non-text entries as a track segment first
+      if (pendingTrack.length > 0) {
+        segments.push({ kind: "track", entries: pendingTrack });
+        pendingTrack = [];
       }
       segments.push({ kind: "text", entry });
     } else {
-      trackBuf.push(entry);
+      pendingTrack.push(entry);
     }
   }
-  if (trackBuf.length > 0) {
-    segments.push({ kind: "track", entries: trackBuf });
+
+  // Flush remaining non-text entries
+  if (pendingTrack.length > 0) {
+    segments.push({ kind: "track", entries: pendingTrack });
   }
   return segments;
 }

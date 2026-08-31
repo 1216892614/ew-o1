@@ -20,6 +20,8 @@ export type ModelParams = {
   thinkingLevel?: ThinkingLevel;
   /** Max tokens per round (every model) */
   maxPerRound: number;
+  /** Max input context tokens before auto-compression. 0 = disabled. */
+  contextLimit?: number;
 };
 
 export type ModelConfig = {
@@ -61,9 +63,9 @@ export const MODELS: ModelInfo[] = [
 
 function buildDefaultParams(model: ModelInfo): ModelParams {
   if (model.thinking) {
-    return { thinkingLevel: "medium", maxPerRound: 16384 };
+    return { thinkingLevel: "medium", maxPerRound: 16384, contextLimit: 0 };
   }
-  return { temperature: 0.7, topP: 1, maxPerRound: 8192 };
+  return { temperature: 0.7, topP: 1, maxPerRound: 8192, contextLimit: 0 };
 }
 
 export function getDefaultModelConfig(): ModelConfig {
@@ -230,6 +232,26 @@ export function ModelSelector({ currentConfig, onConfirm, onClose }: Props) {
                 }
                 integer
               />
+
+              {/* All models: context limit for auto-compression */}
+              <div>
+                <SliderParam
+                  label="Context Limit"
+                  min={0}
+                  max={200000}
+                  step={1000}
+                  value={paramValues.contextLimit ?? 0}
+                  onChange={(v) =>
+                    setParamValues((prev) => ({ ...prev, contextLimit: v }))
+                  }
+                  integer
+                />
+                <div className="text-[10px] text-base-content/40 mt-0.5">
+                  {(paramValues.contextLimit ?? 0) === 0
+                    ? "Auto-compression disabled"
+                    : "Auto-compress when context approaches limit"}
+                </div>
+              </div>
             </div>
 
             <button

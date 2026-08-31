@@ -94,14 +94,14 @@ React + fetch SSE                   Hono /api/chat
   Streamdown (流式 md 渲染)            ↓
   tree path 解析 + leaf 导航        ChatSessionDO (Durable Object)
               ←─── SSE ───→          @tanstack/ai chat()
-                                     tools + maxIterations(5)
+                                     tools + unbounded agent loop + auto-compression
                                      openai adapter → dogapi.cc/deepseek
                                      SQLite 树形节点存储 (热缓存)
                                      → R2 JSONL 持久化 (冷存储)
 ```
 
 - **Durable Object**: `ChatSessionDO` — 每个 session 一个实例，SQLite `nodes` 表存储树形消息，`chat()` 生成流式回复，完成后 flush 到 R2
-- **服务端**: `@tanstack/ai` 的 `chat()` + `toolDefinition()` + `maxIterations(5)` 实现 agent loop，`toServerSentEventsResponse()` 转 SSE
+- **服务端**: `@tanstack/ai` 的 `chat()` + `toolDefinition()` + 无上限 agent loop（终止条件：模型调用 finish 工具 或 用户取消）+ 自动压缩（proactive: 上下文接近 contextLimit 时；reactive: 模型报错上下文满时），`toServerSentEventsResponse()` 转 SSE
 - **客户端**: fetch SSE → 解析 `TEXT_MESSAGE_CONTENT` delta → React state → Streamdown 渲染 markdown
 - **模型路由**: DeepSeek 模型 → AI Gateway → DeepSeek API; 其他 → dogapi.cc (OpenAI 兼容)
 

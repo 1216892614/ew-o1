@@ -113,6 +113,8 @@ export interface ModelParams {
   topP?: number;
   thinkingLevel?: "low" | "medium" | "high";
   maxPerRound?: number;
+  /** Max input context tokens before auto-compression triggers. 0 = disabled. */
+  contextLimit?: number;
 }
 
 /* ── API types ──────────────────────────────────────────── */
@@ -131,6 +133,8 @@ export interface ChatRequestBody {
   attachedFiles?: AttachedFile[];
   /** Tool names to exclude from this request */
   disabledTools?: string[];
+  /** Compression mode for auto-compression: "native" tries provider cache first, "soft" always summarizes */
+  compressMode?: "native" | "soft";
 }
 
 /** GET /api/chat/messages response */

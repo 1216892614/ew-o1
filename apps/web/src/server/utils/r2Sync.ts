@@ -5,10 +5,36 @@ import {
   type NotebookToml,
   type NotebookTomlMeta,
   type NotebookTomlFile,
+  notes,
+  categories,
 } from "@lib/db";
+import type { Database } from "@lib/db";
+import { eq, and, notInArray } from "drizzle-orm";
+import { nanoid } from "nanoid";
 
 function tomlKey(notebookId: string): string {
   return `docs/${notebookId}/ew-o1.toml`;
+}
+
+function noteR2Key(notebookId: string, filename: string): string {
+  return `docs/${notebookId}/${filename}`;
+}
+
+export async function writeNoteContentToR2(
+  r2: R2Bucket,
+  notebookId: string,
+  filename: string,
+  content: string,
+): Promise<void> {
+  await r2.put(noteR2Key(notebookId, filename), content);
+}
+
+export async function deleteNoteContentFromR2(
+  r2: R2Bucket,
+  notebookId: string,
+  filename: string,
+): Promise<void> {
+  await r2.delete(noteR2Key(notebookId, filename));
 }
 
 /**
@@ -117,4 +143,143 @@ export async function updateFileInNotebookToml(
   if (updates.tag !== undefined) file.tag = updates.tag;
   existing.meta.updated_at = new Date();
   await writeNotebookTomlToR2(r2, notebookId, existing);
+}
+
+function computeWordCount(content: string): number {
+  return content.trim().split(/\s+/).filter(Boolean).length;
+}
+
+export async function syncNotebookFromR2ToD1(
+  r2: R2Bucket,
+  db: Database,
+  notebookId: string,
+): Promise<void> {
+  const toml = await readNotebookTomlFromR2(r2, notebookId);
+
+  if (toml.files.length === 0) return;
+
+  const tagToCategoryId = await upsertCategoriesFromTags(db, notebookId, toml.files);
+
+  const tomlFileIds = toml.files.map((f) => f.id);
+
+  for (const file of toml.files) {
+    const content = await readNoteContent(r2, notebookId, file.filename);
+    const categoryId = file.tag ? (tagToCategoryId.get(file.tag) ?? null) : null;
+    await upsertNote(db, notebookId, file, content, categoryId);
+  }
+
+  await db
+    .delete(notes)
+    .where(
+      and(
+        eq(notes.notebookId, notebookId),
+        notInArray(notes.id, tomlFileIds),
+      ),
+    );
+
+  await deleteOrphanCategories(db, notebookId);
+}
+
+async function readNoteContent(
+  r2: R2Bucket,
+  notebookId: string,
+  filename: string,
+): Promise<string> {
+  const object = await r2.get(noteR2Key(notebookId, filename));
+  if (!object) return "";
+  return object.text();
+}
+
+async function upsertNote(
+  db: Database,
+  notebookId: string,
+  file: NotebookTomlFile,
+  content: string,
+  categoryId: string | null,
+): Promise<void> {
+  const now = new Date();
+  const wordCount = computeWordCount(content);
+  const name = file.filename.replace(/\.md$/, "");
+
+  const [existing] = await db
+    .select({ id: notes.id })
+    .from(notes)
+    .where(eq(notes.id, file.id))
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(notes)
+      .set({ name, content, wordCount, categoryId, updatedAt: now })
+      .where(eq(notes.id, file.id));
+  } else {
+    await db.insert(notes).values({
+      id: file.id,
+      notebookId,
+      categoryId,
+      name,
+      content,
+      wordCount,
+      position: Date.now(),
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+}
+
+async function upsertCategoriesFromTags(
+  db: Database,
+  notebookId: string,
+  files: NotebookTomlFile[],
+): Promise<Map<string, string>> {
+  const uniqueTags = [...new Set(files.map((f) => f.tag).filter(Boolean))];
+  const tagToCategoryId = new Map<string, string>();
+
+  const existingCategories = await db
+    .select({ id: categories.id, name: categories.name })
+    .from(categories)
+    .where(eq(categories.notebookId, notebookId));
+
+  const catByName = new Map(existingCategories.map((c) => [c.name, c.id]));
+
+  for (const tag of uniqueTags) {
+    const existingId = catByName.get(tag);
+    if (existingId) {
+      tagToCategoryId.set(tag, existingId);
+    } else {
+      const id = nanoid();
+      await db.insert(categories).values({
+        id,
+        notebookId,
+        name: tag,
+        position: Date.now(),
+        createdAt: new Date(),
+      });
+      tagToCategoryId.set(tag, id);
+    }
+  }
+
+  return tagToCategoryId;
+}
+
+async function deleteOrphanCategories(
+  db: Database,
+  notebookId: string,
+): Promise<void> {
+  const allCats = await db
+    .select({ id: categories.id })
+    .from(categories)
+    .where(eq(categories.notebookId, notebookId));
+
+  for (const cat of allCats) {
+    const [row] = await db
+      .select({ id: notes.id })
+      .from(notes)
+      .where(eq(notes.categoryId, cat.id))
+      .limit(1);
+
+    if (!row) {
+      await db.delete(categories).where(eq(categories.id, cat.id));
+    }
+  }
 }

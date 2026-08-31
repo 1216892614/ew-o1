@@ -25,6 +25,10 @@ migrations_dir = "../../drizzle"
 binding = "R2"
 bucket_name = "ew-r2"
 
+[[kv_namespaces]]
+binding = "SHARE_KV"
+id = "placeholder_share_kv"
+
 # Workers AI (embeddings, generation, etc.)
 [ai]
 binding = "AI"

@@ -15,7 +15,8 @@ export function Header() {
         <span className="text-lg font-semibold text-base-content">ew-o1</span>
       </a>
       <div id="header-center" className="flex-1 flex justify-center" />
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-2">
+        <div id="header-actions" className="flex items-center gap-2" />
         <ThemeSwitcher />
       </div>
     </header>
