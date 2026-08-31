@@ -1,4 +1,5 @@
 import logoUrl from "@/client/assets/logo-64.png";
+import { SignOut } from "@phosphor-icons/react";
 import ThemeSwitcher from "./ThemeSwitcher";
 
 export function Header() {
@@ -18,6 +19,13 @@ export function Header() {
       <div className="ml-auto flex items-center gap-2">
         <div id="header-actions" className="flex items-center gap-2" />
         <ThemeSwitcher />
+        <a
+          href="/cdn-cgi/access/logout"
+          className="btn btn-ghost btn-sm btn-square"
+          title="登出"
+        >
+          <SignOut size={18} />
+        </a>
       </div>
     </header>
   );
