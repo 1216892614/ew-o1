@@ -41,7 +41,7 @@ export type AskEntry = {
   resolved: boolean;
 };
 
-export type FinishEntry = { kind: "finish"; message: string };
+export type FinishEntry = { kind: "finish" };
 
 export type AiSearchResultItem = {
   fileId: string;

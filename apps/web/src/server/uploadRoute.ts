@@ -3,7 +3,7 @@ import { nanoid } from "nanoid";
 import db from "@lib/db";
 import { notes, categories } from "@lib/db";
 import type { HonoCtxEnv } from "@/shared/types";
-import { addFileToNotebookToml } from "./utils/r2Sync";
+import { addFileToNotebookToml, bumpNotebookTimestamps, updateNotebookFileCount } from "./utils/r2Sync";
 
 function ensureMarkdownSuffix(filename: string): string {
   if (filename.endsWith(".md")) return filename;
@@ -97,6 +97,9 @@ uploadRoute.post("/api/upload", async (c) => {
 
     createdNotes.push({ id: noteId, name: noteName });
   }
+
+  await updateNotebookFileCount(database, notebookId);
+  await bumpNotebookTimestamps(r2, database, notebookId);
 
   return c.json({
     uploaded: createdNotes.length,

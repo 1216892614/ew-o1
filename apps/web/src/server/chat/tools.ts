@@ -2,7 +2,7 @@ import { z } from "zod";
 import { applyPatch } from "diff";
 import type { AnyTool } from "@tanstack/ai";
 import { upsertNoteToAiSearch, searchNotebook } from "../utils/aiSearchSync";
-import { writeNoteContentToR2, deleteNoteContentFromR2, updateFileInNotebookToml } from "../utils/r2Sync";
+import { writeNoteContentToR2, deleteNoteContentFromR2, updateFileInNotebookToml, bumpNotebookTimestamps } from "../utils/r2Sync";
 import dbFactory from "@lib/db";
 import { recordSnapshot } from "../utils/snapshot";
 import { getContainer } from "@cloudflare/containers";
@@ -456,6 +456,8 @@ export function createAgentTools(params: CreateAgentToolsParams) {
           });
         }
 
+        await bumpNotebookTimestamps(env.R2, drizzleDb, notebookId);
+
         return { success: true, file_id: args.file_id };
       },
     }),
@@ -545,6 +547,8 @@ export function createAgentTools(params: CreateAgentToolsParams) {
             afterContent: newContent,
           });
         }
+
+        await bumpNotebookTimestamps(env.R2, drizzleDb, notebookId);
 
         return { success: true, file_id: args.file_id };
       },
@@ -642,8 +646,8 @@ export function createAgentTools(params: CreateAgentToolsParams) {
 
     tool({
       name: "finish",
-      description: "Signal task complete. Terminates the agent loop.",
-      inputSchema: z.object({ message: z.string() }),
+      description: "Terminate the agent loop. Call after you have replied to the user.",
+      inputSchema: z.object({}),
       outputSchema: z.object({ success: z.boolean() }),
       execute: async () => {
         finishFlagRef.current = true;

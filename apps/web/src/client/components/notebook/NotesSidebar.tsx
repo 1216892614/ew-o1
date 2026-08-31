@@ -13,6 +13,7 @@ import {
   FolderSimplePlus,
   PencilSimple,
   ClockCounterClockwise,
+  ArrowClockwise,
 } from "@phosphor-icons/react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { trpc } from "@/client/lib/trpc";
@@ -283,8 +284,22 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
   const activeNoteId = useAtomValue(activeNoteIdAtom);
   const openedSet = useMemo(() => new Set(openedNoteIds), [openedNoteIds]);
 
+  const storageKey = `ew:sidebar-expanded:${notebookId}`;
+  const hadSavedState = useRef(false);
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(
-    new Set(["__archived__"]),
+    () => {
+      try {
+        const raw = localStorage.getItem(storageKey);
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) {
+            hadSavedState.current = true;
+            return new Set<string>(arr);
+          }
+        }
+      } catch { /* ignore corrupt data */ }
+      return new Set(["__archived__"]);
+    },
   );
   const [addingMode, setAddingMode] = useState<"none" | "note">("none");
   const [newItemName, setNewItemName] = useState("");
@@ -305,6 +320,22 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
   const updateNote = trpc.notes.updateNote.useMutation();
   const batchUpdate = trpc.notes.batchUpdateNotes.useMutation();
   const utils = trpc.useUtils();
+  const initFromR2 = trpc.notes.initFromR2.useMutation();
+  const [isSyncing, setIsSyncing] = useState(false);
+  const handleRefreshFromR2 = useCallback(async () => {
+    setIsSyncing(true);
+    try {
+      await initFromR2.mutateAsync({ notebookId });
+      utils.notes.listNotes.invalidate();
+      utils.notes.listCategories.invalidate();
+      utils.notes.getNotebook.invalidate();
+      toast.success("已同步");
+    } catch {
+      toast.error("同步失败");
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [notebookId, initFromR2, utils]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -362,18 +393,33 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
     [notebookId, utils, createCategory],
   );
 
-  // Expand all categories on initial load
+  // Auto-expand: all on first load (no saved state), only new ones thereafter
+  const knownCatIdsRef = useRef<Set<string> | null>(null);
   useEffect(() => {
-    if (categories.length > 0) {
-      setExpandedCategories((prev) => {
-        const next = new Set(prev);
-        next.add("__archived__");
-        for (const cat of categories) {
-          next.add(cat.id);
-        }
-        return next;
-      });
+    if (categories.length === 0) return;
+    const currentIds = new Set(categories.map((c) => c.id));
+    const prev = knownCatIdsRef.current;
+    knownCatIdsRef.current = currentIds;
+    if (prev === null) {
+      // First load — expand all only when no localStorage state existed
+      if (!hadSavedState.current) {
+        setExpandedCategories((s) => {
+          const next = new Set(s);
+          next.add("__archived__");
+          for (const id of currentIds) next.add(id);
+          return next;
+        });
+      }
+      return;
     }
+    // Subsequent: expand only genuinely new categories
+    const newIds = [...currentIds].filter((id) => !prev.has(id));
+    if (newIds.length === 0) return;
+    setExpandedCategories((s) => {
+      const next = new Set(s);
+      for (const id of newIds) next.add(id);
+      return next;
+    });
   }, [categories]);
 
 
@@ -551,6 +597,23 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
     return sections;
   }, [categories]);
 
+  // Persist expanded state to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify([...expandedCategories]));
+    } catch { /* quota exceeded, etc. */ }
+  }, [expandedCategories, storageKey]);
+
+  // Prune stale category IDs when categories change
+  useEffect(() => {
+    const validIds = new Set(orderedSections.map((s) => s.id));
+    setExpandedCategories((prev) => {
+      const pruned = new Set([...prev].filter((id) => validIds.has(id)));
+      if (pruned.size === prev.size) return prev; // no change
+      return pruned;
+    });
+  }, [orderedSections]);
+
   return (
     <div className="flex flex-col h-full bg-base-100">
       {/* Toolbar */}
@@ -633,6 +696,18 @@ export function NotesSidebar({ notebookId, draggedNoteIds, isDragging, onOpenTim
 
         {/* Sort + Time Machine */}
         <div className="ml-auto flex items-center gap-0.5">
+          <button
+            className="btn btn-ghost btn-xs"
+            onClick={handleRefreshFromR2}
+            disabled={isSyncing}
+            title="从 R2 同步"
+          >
+            {isSyncing ? (
+              <span className="loading loading-spinner loading-xs" />
+            ) : (
+              <ArrowClockwise size={14} />
+            )}
+          </button>
           <button
             className="btn btn-ghost btn-xs"
             onClick={onOpenTimeMachine}

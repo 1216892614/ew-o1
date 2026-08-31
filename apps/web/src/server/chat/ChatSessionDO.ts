@@ -794,10 +794,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
                 timeline.push({ kind: "ask", questions: args.questions ?? [], resolved: false } satisfies AskEntry);
               } catch {}
             } else if (toolName === "finish") {
-              try {
-                const args = JSON.parse(entry.args);
-                timeline.push({ kind: "finish", message: args.message ?? "" } satisfies FinishEntry);
-              } catch {}
+              timeline.push({ kind: "finish" } satisfies FinishEntry);
             }
           }
           break;

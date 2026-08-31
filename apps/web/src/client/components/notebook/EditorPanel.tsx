@@ -205,7 +205,7 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
         {/* Follow mode content */}
         <div className="flex-1 overflow-hidden">
           {lastToolFocus ? (
-            <FollowModeContent focus={lastToolFocus} theme={theme} />
+            <FollowModeContent focus={lastToolFocus} theme={theme} notes={notes ?? []} />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 text-base-content/30">
               {agentStreaming ? (
@@ -378,26 +378,35 @@ export function EditorPanel({ notebookId }: EditorPanelProps) {
 function FollowModeContent({
   focus,
   theme,
+  notes,
 }: {
   focus: ToolFocus;
   theme: "vs-dark" | "vs";
+  notes: { id: string; content: string | null }[];
 }) {
   type MonacoEditor = Parameters<OnMount>[0];
   const editorRef = useRef<MonacoEditor | null>(null);
 
   if (focus.type === "read") {
-    // Strip line number prefixes (e.g. "1: # Title\n2: content")
-    const rawContent = focus.content;
-    const lines = rawContent.split("\n");
-    const stripped = lines.map((line) => {
-      const m = line.match(/^\d+:\s?(.*)$/);
-      return m ? m[1] : line;
-    });
-    const displayContent = stripped.join("\n");
+    // Try to get full file content from loaded notes
+    const fullNote = notes.find((n) => n.id === focus.fileId);
+    const fullContent = fullNote?.content ?? "";
+
+    // If we have the full content, show it entirely with the read range highlighted
+    const displayContent = fullContent || stripNumberedLines(focus.content);
+    const showingFullFile = !!fullContent;
+
+    // Determine highlight range (1-based line numbers for Monaco)
+    // When lineStart is absent, tool returns from line 1 (default first 50 lines)
+    const highlightStart = focus.lineStart ?? 1;
+    const returnedLineCount = focus.content.split("\n").length;
+    const highlightEnd = focus.lineEnd ?? (highlightStart + returnedLineCount - 1);
+    // Only highlight when showing full file (otherwise everything is the read portion)
+    const shouldHighlight = showingFullFile && highlightEnd > 0;
 
     return (
       <Editor
-        key={`follow-read-${focus.fileId}-${focus.lineStart ?? 0}`}
+        key={`follow-read-${focus.fileId}`}
         height="100%"
         language="markdown"
         theme={theme}
@@ -405,18 +414,14 @@ function FollowModeContent({
         onMount={(editor) => {
           editorRef.current = editor;
 
-          // Highlight the read range if specified
-          if (focus.lineStart != null) {
-            // Map focus lines to editor lines (content may be a slice)
-            const startLine = 1;
-            const endLine = stripped.length;
-
-            const _decorations = editor.createDecorationsCollection([
+          if (shouldHighlight) {
+            // Highlight the read range
+            editor.createDecorationsCollection([
               {
                 range: {
-                  startLineNumber: startLine,
+                  startLineNumber: highlightStart,
                   startColumn: 1,
-                  endLineNumber: endLine,
+                  endLineNumber: highlightEnd,
                   endColumn: 1,
                 },
                 options: {
@@ -430,20 +435,14 @@ function FollowModeContent({
               },
             ]);
 
-            // Scroll to the highlighted range
-            editor.revealLineInCenter(startLine);
+            // Auto-scroll to the start of the highlighted read range
+            editor.revealLineInCenter(highlightStart);
           }
         }}
         options={{
           readOnly: true,
           minimap: { enabled: false },
-          lineNumbers: (lineNumber: number) => {
-            // Show original line numbers when we know the start
-            if (focus.lineStart != null) {
-              return String(focus.lineStart + lineNumber - 1);
-            }
-            return String(lineNumber);
-          },
+          lineNumbers: "on",
           wordWrap: "on",
           fontSize: 14,
           padding: { top: 16 },
@@ -582,6 +581,17 @@ function FollowModeContent({
       }}
     />
   );
+}
+
+/** Strip "N: " line-number prefixes from read_file output */
+function stripNumberedLines(raw: string): string {
+  return raw
+    .split("\n")
+    .map((line) => {
+      const m = line.match(/^\d+:\s?(.*)$/);
+      return m ? m[1] : line;
+    })
+    .join("\n");
 }
 
 /** Parse a unified diff hunk into original/modified text for DiffEditor */

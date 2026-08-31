@@ -10,7 +10,7 @@ import {
   notebooks,
 } from "@lib/db";
 import type { Database } from "@lib/db";
-import { eq, and, notInArray } from "drizzle-orm";
+import { eq, and, notInArray, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 
 function tomlKey(notebookId: string): string {
@@ -157,7 +157,25 @@ export async function syncNotebookFromR2ToD1(
 ): Promise<void> {
   const toml = await readNotebookTomlFromR2(r2, notebookId);
 
-  if (toml.files.length === 0) return;
+  await db
+    .update(notebooks)
+    .set({
+      name: toml.meta.name || notebookId,
+      description: toml.meta.description || "",
+      color: toml.meta.color || "#6366f1",
+      icon: toml.meta.icon || "notebook",
+      fileCount: toml.files.length,
+      updatedAt: toml.meta.updated_at ?? new Date(),
+    })
+    .where(eq(notebooks.id, notebookId));
+
+  if (toml.files.length === 0) {
+    await db
+      .delete(notes)
+      .where(eq(notes.notebookId, notebookId));
+    await deleteOrphanCategories(db, notebookId);
+    return;
+  }
 
   const tagToCategoryId = await upsertCategoriesFromTags(db, notebookId, toml.files);
 
@@ -338,12 +356,34 @@ export async function discoverAndSyncAllFromR2(
     // Sync notes from R2 → D1
     await syncNotebookFromR2ToD1(r2, db, nbId);
 
-    // Update file count
-    await db
-      .update(notebooks)
-      .set({ fileCount: toml.files.length, updatedAt: new Date() })
-      .where(eq(notebooks.id, nbId));
   }
 
   return { discovered, synced: notebookIds.length };
+}
+
+export async function bumpNotebookTimestamps(
+  r2: R2Bucket,
+  db: Database,
+  notebookId: string,
+): Promise<void> {
+  const now = new Date();
+  await db
+    .update(notebooks)
+    .set({ updatedAt: now })
+    .where(eq(notebooks.id, notebookId));
+  await updateNotebookMetaInR2(r2, notebookId, { updated_at: now });
+}
+
+export async function updateNotebookFileCount(
+  db: Database,
+  notebookId: string,
+): Promise<void> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(notes)
+    .where(and(eq(notes.notebookId, notebookId), eq(notes.archived, false)));
+  await db
+    .update(notebooks)
+    .set({ fileCount: row?.count ?? 0, updatedAt: new Date() })
+    .where(eq(notebooks.id, notebookId));
 }

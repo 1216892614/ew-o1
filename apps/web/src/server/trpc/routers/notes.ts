@@ -12,6 +12,8 @@ import {
   writeNoteContentToR2,
   deleteNoteContentFromR2,
   syncNotebookFromR2ToD1,
+  bumpNotebookTimestamps,
+  updateNotebookFileCount,
 } from "../../utils/r2Sync";
 import { upsertNoteToAiSearch, deleteNoteFromAiSearch } from "../../utils/aiSearchSync";
 import { recordSnapshot } from "../../utils/snapshot";
@@ -208,6 +210,9 @@ export const notesRouter = router({
         afterContent: "",
       });
 
+      await updateNotebookFileCount(ctx.db, input.notebookId);
+      await bumpNotebookTimestamps(ctx.env.R2, ctx.db, input.notebookId);
+
       return { id };
     }),
 
@@ -273,6 +278,9 @@ export const notesRouter = router({
         if (noteForR2) {
           await writeNoteContentToR2(ctx.env.R2, noteForR2.notebookId, `${noteForR2.name}.md`, data.content);
         }
+      }
+      if (data.content !== undefined || data.name !== undefined || data.categoryId !== undefined) {
+        await bumpNotebookTimestamps(ctx.env.R2, ctx.db, beforeNote!.notebookId);
       }
 
       if (data.name !== undefined && beforeNote) {
@@ -404,6 +412,18 @@ export const notesRouter = router({
           }
         }
       }
+      const notebookIdsToUpdate = new Set<string>();
+      const affectedForBump = await ctx.db
+        .select({ notebookId: notes.notebookId })
+        .from(notes)
+        .where(inArray(notes.id, ids));
+      for (const n of affectedForBump) notebookIdsToUpdate.add(n.notebookId);
+      for (const nbId of notebookIdsToUpdate) {
+        await ctx.db
+          .update(notebooks)
+          .set({ updatedAt: new Date() })
+          .where(eq(notebooks.id, nbId));
+      }
     }),
 
   deleteNote: publicProcedure
@@ -441,6 +461,10 @@ export const notesRouter = router({
           beforeContent: fullNote.content ?? "",
           afterContent: "",
         });
+      }
+      if (note) {
+        await updateNotebookFileCount(ctx.db, note.notebookId);
+        await bumpNotebookTimestamps(ctx.env.R2, ctx.db, note.notebookId);
       }
     }),
 

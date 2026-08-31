@@ -587,11 +587,11 @@ export function AgentChat({
         "1. 理解阶段 — 分析用户意图，规划行动",
         "2. 检索阶段 — 用 search_file 搜索笔记、用 read_file 阅读文件、用 web_search / web_page_read 联网查询",
         "3. 执行阶段 — 用 edit_file / edit_content 修改文件，或综合信息回答问题",
-        "4. 终结阶段 — 调用 finish 工具报告结果",
+        "4. 终结阶段 — 先输出总结内容，再调用 finish 终止循环",
         "",
         "⚠️ 关键规则：",
         "- 任务完成后 **必须** 调用 finish 工具。这是终止 agent loop 的唯一正确方式。如果不调用 finish，循环会永远继续。",
-        "- finish 的 message 参数是给用户的最终回复，应包含完整的回答或操作总结。",
+        "- 在调用 finish 之前，先用普通文字输出完整的回答或操作总结。",
         "- 简单对话（打招呼、闲聊、直接回答的问题）也必须调用 finish，不要只输出文字。",
         "- 需要中途向用户确认时，使用 ask 工具（会暂停循环等待回答）。",
         "",
@@ -604,7 +604,7 @@ export function AgentChat({
         "- web_search：联网搜索。",
         "- web_page_read：阅读网页内容。",
         "- ask：向用户提问并等待回答（阻塞式）。",
-        "- finish：**声明任务完成，终止循环**。每次对话必须以此结束。",
+        "- finish：**终止循环**。先输出文字回复，再调用此工具结束对话。",
         "",
         "## 行为准则",
         "",
@@ -728,7 +728,7 @@ export function AgentChat({
                finalizeStreaming() will set the terminal status once the SSE stream closes. */
             return [
               ...before,
-              { kind: "finish", message: (parsed.message ?? "") as string },
+              { kind: "finish" },
               ...after,
             ];
           }
@@ -2179,11 +2179,7 @@ function TimelineStepContent({
         <AskContent entry={entry} isWaiting={streamingStatus === "waiting"} />
       );
     case "finish":
-      return (
-        <span className="text-xs text-success leading-relaxed">
-          {entry.message}
-        </span>
-      );
+      return null;
     default:
       return null;
   }
