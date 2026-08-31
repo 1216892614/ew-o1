@@ -12,7 +12,8 @@ interface NotebookCardProps {
   onMenuClick: () => void;
 }
 
-function formatRelativeTime(date: Date): string {
+function formatRelativeTime(date: Date | null | undefined): string {
+  if (!date) return "—";
   const now = Date.now();
   const diffMs = now - date.getTime();
   const diffMinutes = Math.floor(diffMs / 60_000);

@@ -50,7 +50,8 @@ interface NotesSidebarProps {
   onOpenTimeMachine?: () => void;
 }
 
-function relativeTime(date: Date): string {
+function relativeTime(date: Date | null | undefined): string {
+  if (!date) return "—";
   const now = Date.now();
   const diffMs = now - date.getTime();
   const diffMinutes = Math.floor(diffMs / 60_000);

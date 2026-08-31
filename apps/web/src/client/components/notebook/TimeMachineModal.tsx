@@ -17,7 +17,8 @@ interface TimeMachineModalProps {
   onClose: () => void;
 }
 
-function relativeTime(date: Date): string {
+function relativeTime(date: Date | null | undefined): string {
+  if (!date) return "—";
   const now = Date.now();
   const diff = now - date.getTime();
   const minutes = Math.floor(diff / 60000);
@@ -30,7 +31,8 @@ function relativeTime(date: Date): string {
   return date.toLocaleDateString("zh-CN");
 }
 
-function formatDate(date: Date): string {
+function formatDate(date: Date | null | undefined): string {
+  if (!date) return "—";
   return date.toLocaleString("zh-CN", {
     month: "2-digit",
     day: "2-digit",
