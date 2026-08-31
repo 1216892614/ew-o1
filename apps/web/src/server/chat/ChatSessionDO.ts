@@ -564,9 +564,8 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     const runningMessages = [...messages];
     const baseSystemPrompts = [...systemPrompts];
     let prevRoundHadToolCalls = false;
-    const MAX_ROUNDS = 20;
 
-    for (let round = 1; round <= MAX_ROUNDS; round++) {
+    for (let round = 1; ; round++) {
       if (this.finishCalled) break;
 
       let roundSystemPrompts = [...baseSystemPrompts];
