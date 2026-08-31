@@ -3,7 +3,7 @@ import { notebooks } from "@lib/db";
 import { desc, lt, and, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { publicProcedure, router } from "../init";
-import { writeNotebookTomlToR2, updateNotebookMetaInR2 } from "../../utils/r2Sync";
+import { writeNotebookTomlToR2, updateNotebookMetaInR2, discoverAndSyncAllFromR2 } from "../../utils/r2Sync";
 
 const NOTEBOOKS_PAGE_SIZE = 20;
 
@@ -121,5 +121,10 @@ export const notebooksRouter = router({
         .where(eq(notebooks.id, id));
 
       return updated;
+    }),
+
+  syncAllFromR2: publicProcedure
+    .mutation(async ({ ctx }) => {
+      return discoverAndSyncAllFromR2(ctx.env.R2, ctx.db);
     }),
 });

@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Plus, Notebook } from "@phosphor-icons/react";
+import { Plus, ArrowsClockwise, Notebook } from "@phosphor-icons/react";
 import { trpc } from "@/client/lib/trpc";
 import { NotebookCard } from "@/client/components/NotebookCard";
 import { NotebookModal } from "@/client/components/NotebookModal";
@@ -32,6 +32,8 @@ function HomePage() {
   const [modalState, setModalState] = useState<ModalState>({ mode: "closed" });
   const isArchived = activeTab === "archived";
 
+  const utils = trpc.useUtils();
+
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } =
     trpc.notebooks.listInfinite.useInfiniteQuery(
       { limit: 20, archived: isArchived },
@@ -39,6 +41,12 @@ function HomePage() {
         getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
       },
     );
+
+  const syncMutation = trpc.notebooks.syncAllFromR2.useMutation({
+    onSuccess: () => {
+      utils.notebooks.listInfinite.invalidate();
+    },
+  });
 
   const observerRef = useRef<IntersectionObserver | null>(null);
   const sentinelRef = useCallback(
@@ -87,6 +95,19 @@ function HomePage() {
               归档
             </button>
           </div>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm gap-1"
+            disabled={syncMutation.isPending}
+            onClick={() => syncMutation.mutate()}
+          >
+            <ArrowsClockwise
+              size={16}
+              weight="bold"
+              className={syncMutation.isPending ? "animate-spin" : ""}
+            />
+            {syncMutation.isPending ? "同步中…" : "同步 R2"}
+          </button>
           <button
             type="button"
             className="btn btn-primary btn-sm gap-1"

@@ -7,6 +7,7 @@ import {
   type NotebookTomlFile,
   notes,
   categories,
+  notebooks,
 } from "@lib/db";
 import type { Database } from "@lib/db";
 import { eq, and, notInArray } from "drizzle-orm";
@@ -282,4 +283,67 @@ async function deleteOrphanCategories(
       await db.delete(categories).where(eq(categories.id, cat.id));
     }
   }
+}
+
+/**
+ * Scan R2 for all `docs/<id>/ew-o1.toml`, discover notebooks not yet in D1,
+ * create missing notebook rows, and sync every notebook's notes from R2.
+ */
+export async function discoverAndSyncAllFromR2(
+  r2: R2Bucket,
+  db: Database,
+): Promise<{ discovered: number; synced: number }> {
+  // List all objects under docs/ matching the toml pattern
+  const notebookIds: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const listed = await r2.list({ prefix: "docs/", cursor, limit: 500 });
+    for (const obj of listed.objects) {
+      const match = obj.key.match(/^docs\/([^/]+)\/ew-o1\.toml$/);
+      if (match) notebookIds.push(match[1]);
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+
+  if (notebookIds.length === 0) return { discovered: 0, synced: 0 };
+
+  // Find which notebooks already exist in D1
+  const existingRows = await db
+    .select({ id: notebooks.id })
+    .from(notebooks);
+  const existingIds = new Set(existingRows.map((r) => r.id));
+
+  let discovered = 0;
+
+  for (const nbId of notebookIds) {
+    const toml = await readNotebookTomlFromR2(r2, nbId);
+
+    // Create notebook row if missing
+    if (!existingIds.has(nbId)) {
+      const now = new Date();
+      await db.insert(notebooks).values({
+        id: nbId,
+        name: toml.meta.name || nbId,
+        description: toml.meta.description || "",
+        color: toml.meta.color || "#6366f1",
+        icon: toml.meta.icon || "notebook",
+        fileCount: toml.files.length,
+        archived: false,
+        updatedAt: toml.meta.updated_at ?? now,
+        createdAt: now,
+      });
+      discovered++;
+    }
+
+    // Sync notes from R2 → D1
+    await syncNotebookFromR2ToD1(r2, db, nbId);
+
+    // Update file count
+    await db
+      .update(notebooks)
+      .set({ fileCount: toml.files.length, updatedAt: new Date() })
+      .where(eq(notebooks.id, nbId));
+  }
+
+  return { discovered, synced: notebookIds.length };
 }

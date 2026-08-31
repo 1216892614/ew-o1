@@ -146,43 +146,25 @@ function NotebookPageInner({ notebookId }: { notebookId: string }) {
     setDraggedNoteIds([]);
   }
 
-  function handleCategorySelected(categoryId: string | null) {
-    if (!pendingCategoryNoteIds || pendingCategoryNoteIds.length === 0) return;
-    batchUpdate.mutate(
-      {
-        ids: pendingCategoryNoteIds,
-        categoryId,
-      },
-      {
-        onSuccess: () => {
-          utils.notes.listNotes.invalidate();
-          utils.notes.listCategories.invalidate();
-        },
-      },
-    );
-    setPendingCategoryNoteIds(null);
-  }
-
-  function handleCreateCategoryAndAssign(name: string) {
+  async function handleCategorySelected(categoryId: string | null) {
     if (!pendingCategoryNoteIds || pendingCategoryNoteIds.length === 0) return;
     const ids = [...pendingCategoryNoteIds];
-    createCategory.mutate(
-      { notebookId, name },
-      {
-        onSuccess: (result) => {
-          batchUpdate.mutate(
-            { ids, categoryId: result.id },
-            {
-              onSuccess: () => {
-                utils.notes.listNotes.invalidate();
-                utils.notes.listCategories.invalidate();
-              },
-            },
-          );
-        },
-      },
-    );
     setPendingCategoryNoteIds(null);
+    await batchUpdate.mutateAsync({ ids, categoryId });
+    utils.notes.listNotes.invalidate();
+    utils.notes.listCategories.invalidate();
+  }
+
+  async function handleCreateCategoryAndAssign(name: string) {
+    if (!pendingCategoryNoteIds || pendingCategoryNoteIds.length === 0) return;
+    const ids = [...pendingCategoryNoteIds];
+    setPendingCategoryNoteIds(null);
+    const result = await createCategory.mutateAsync({ notebookId, name });
+    // Invalidate immediately so the sidebar shows the new category
+    utils.notes.listCategories.invalidate();
+    await batchUpdate.mutateAsync({ ids, categoryId: result.id });
+    utils.notes.listNotes.invalidate();
+    utils.notes.listCategories.invalidate();
   }
 
   if (!r2Initialized || !notebook) {
