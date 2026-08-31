@@ -27,7 +27,7 @@ bucket_name = "ew-r2"
 
 [[kv_namespaces]]
 binding = "SHARE_KV"
-id = "placeholder_share_kv"
+id = "0daff408c9c343e09011f67a4683fd75"
 
 # Workers AI (embeddings, generation, etc.)
 [ai]
