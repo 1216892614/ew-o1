@@ -2,7 +2,7 @@ import { z } from "zod";
 import { applyPatch } from "diff";
 import type { AnyTool } from "@tanstack/ai";
 import { upsertNoteToAiSearch, searchNotebook } from "../utils/aiSearchSync";
-import { writeNoteContentToR2, deleteNoteContentFromR2, updateFileInNotebookToml, bumpNotebookTimestamps } from "../utils/r2Sync";
+import { writeNoteContentToR2, deleteNoteContentFromR2, updateFileInNotebookToml, addFileToNotebookToml, bumpNotebookTimestamps } from "../utils/r2Sync";
 import dbFactory from "@lib/db";
 import { recordSnapshot } from "../utils/snapshot";
 import { getContainer } from "@cloudflare/containers";
@@ -355,15 +355,106 @@ export function createAgentTools(params: CreateAgentToolsParams) {
     tool({
       name: "edit_file",
       description:
-        "Rename a file or change its category. Requires a prior read_file call.\n" +
-        'new_tag: category name/ID to move to. "Archived" = archive. Omit = no change.',
+        "Rename a file, change its category, or create a new file.\n" +
+        "Create new file:\n" +
+        '  - Set file_id to "new_file" or "" to create a new file. new_filename is required.\n' +
+        "  - Optionally provide new_content for initial content (defaults to empty).\n" +
+        "  - Optionally provide new_tag to place it in a category.\n" +
+        "Edit existing file:\n" +
+        "  - Requires a prior read_file call.\n" +
+        '  - new_tag: category name/ID to move to. "Archived" = archive. Omit = no change.',
       inputSchema: z.object({
-        file_id: z.string(),
-        new_filename: z.string().optional(),
-        new_tag: z.string().optional(),
+        file_id: z.string().describe('File ID, or "new_file" / "" to create a new file'),
+        new_filename: z.string().optional().describe("New filename (required when creating)"),
+        new_tag: z.string().optional().describe('Category name/ID. "Archived" = archive'),
+        new_content: z.string().optional().describe("Initial content for new file (create only)"),
       }),
       outputSchema: z.object({ success: z.boolean(), file_id: z.string(), error: z.string().optional() }),
       execute: async (args) => {
+        const isCreate = args.file_id === "new_file" || args.file_id === "";
+
+        /* ── Create new file ─────────────────────────────── */
+        if (isCreate) {
+          if (!args.new_filename) {
+            return { success: false, file_id: "", error: "new_filename is required when creating a new file." };
+          }
+
+          const newId = crypto.randomUUID();
+          const now = new Date().toISOString();
+          const content = args.new_content ?? "";
+          const wordCount = content.split(/\s+/).filter(Boolean).length;
+
+          // Resolve category
+          let categoryId: string | null = null;
+          let tagName = "";
+          if (args.new_tag && args.new_tag !== "Archived") {
+            let category = await db
+              .prepare("SELECT id, name FROM categories WHERE (name = ? OR id = ?) AND notebook_id = ?")
+              .bind(args.new_tag, args.new_tag, notebookId)
+              .first<{ id: string; name: string }>();
+
+            if (!category) {
+              const newCatId = crypto.randomUUID();
+              const maxPos = await db
+                .prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM categories WHERE notebook_id = ?")
+                .bind(notebookId)
+                .first<{ next_pos: number }>();
+              await db
+                .prepare("INSERT INTO categories (id, notebook_id, name, position, is_archive, created_at) VALUES (?, ?, ?, ?, 0, ?)")
+                .bind(newCatId, notebookId, args.new_tag, maxPos?.next_pos ?? 0, Date.now())
+                .run();
+              category = { id: newCatId, name: args.new_tag };
+            }
+            categoryId = category.id;
+            tagName = category.name;
+          }
+
+          // Insert note
+          await db
+            .prepare(
+              "INSERT INTO notes (id, notebook_id, category_id, name, content, word_count, active, archived, position, updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)",
+            )
+            .bind(newId, notebookId, categoryId, args.new_filename, content, wordCount, Date.now(), now, now)
+            .run();
+
+          // Sync to R2
+          await addFileToNotebookToml(env.R2, notebookId, {
+            filename: `${args.new_filename}.md`,
+            id: newId,
+            tag: tagName,
+          });
+          await writeNoteContentToR2(env.R2, notebookId, `${args.new_filename}.md`, content);
+
+          // Index into AI Search
+          if (env.AI_SEARCH) {
+            upsertNoteToAiSearch(env.AI_SEARCH, {
+              notebookId,
+              noteId: newId,
+              filename: args.new_filename,
+              content,
+            }).catch(() => {});
+          }
+
+          // Update hash map so subsequent edit_content can work without read_file
+          contentHashMap.set(newId, await sha256Hex(content));
+
+          await recordSnapshot({
+            db: drizzleDb,
+            notebookId,
+            noteId: newId,
+            action: "agent_create",
+            summary: `AI 新建文件 ${args.new_filename}`,
+            source: "agent",
+            sessionName: null,
+            toolName: "edit_file",
+          });
+
+          await bumpNotebookTimestamps(env.R2, drizzleDb, notebookId);
+
+          return { success: true, file_id: newId };
+        }
+
+        /* ── Edit existing file ──────────────────────────── */
         const check = await verifyHash(db, args.file_id, contentHashMap);
         if (!check.ok) return { success: false, file_id: args.file_id, error: check.error };
 
