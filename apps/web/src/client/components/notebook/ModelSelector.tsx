@@ -9,6 +9,8 @@ export type ModelInfo = {
   provider: "Anthropic" | "OpenAI" | "DeepSeek" | "xAI" | "MiniMax";
   thinking?: boolean;
   free?: boolean;
+  /** Max input context window in tokens. Used to derive default contextLimit. */
+  contextWindow: number;
 };
 
 export type ModelParams = {
@@ -30,42 +32,44 @@ export type ModelConfig = {
 };
 
 export const MODELS: ModelInfo[] = [
-  { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "Anthropic" },
-  { id: "claude-sonnet-5-thinking", name: "Claude Sonnet 5 Thinking", provider: "Anthropic", thinking: true },
-  { id: "claude-opus-5", name: "Claude Opus 5", provider: "Anthropic" },
-  { id: "claude-opus-5-thinking", name: "Claude Opus 5 Thinking", provider: "Anthropic", thinking: true },
-  { id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "Anthropic" },
-  { id: "claude-opus-4-8-thinking", name: "Claude Opus 4.8 Thinking", provider: "Anthropic", thinking: true },
-  { id: "claude-opus-4-7", name: "Claude Opus 4.7", provider: "Anthropic" },
-  { id: "claude-opus-4-7-thinking", name: "Claude Opus 4.7 Thinking", provider: "Anthropic", thinking: true },
-  { id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic" },
-  { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 Thinking", provider: "Anthropic", thinking: true },
-  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "Anthropic" },
-  { id: "claude-sonnet-4-6-thinking", name: "Claude Sonnet 4.6 Thinking", provider: "Anthropic", thinking: true },
-  { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", provider: "Anthropic" },
-  { id: "claude-haiku-4-5-20251001-thinking", name: "Claude Haiku 4.5 Thinking", provider: "Anthropic", thinking: true },
-  { id: "composer-2.5", name: "Composer 2.5", provider: "Anthropic" },
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "OpenAI" },
-  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", provider: "OpenAI" },
-  { id: "gpt-5.5", name: "GPT-5.5", provider: "OpenAI" },
-  { id: "gpt-5.4", name: "GPT-5.4", provider: "OpenAI" },
-  { id: "gpt-5.4-mini", name: "GPT-5.4 Mini", provider: "OpenAI" },
-  { id: "gpt-oss-120b-free", name: "GPT-OSS 120B", provider: "OpenAI", free: true },
-  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "DeepSeek" },
-  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", provider: "DeepSeek" },
-  { id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash Free", provider: "DeepSeek", free: true },
-  { id: "grok-4.6", name: "Grok 4.6", provider: "xAI" },
-  { id: "grok-4.5", name: "Grok 4.5", provider: "xAI" },
-  { id: "musk-4.5", name: "Musk 4.5", provider: "xAI" },
-  { id: "minimax-m3", name: "MiniMax M3", provider: "MiniMax" },
-  { id: "minimax-m2.7-free", name: "MiniMax M2.7", provider: "MiniMax", free: true },
+  { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "Anthropic", contextWindow: 200000 },
+  { id: "claude-sonnet-5-thinking", name: "Claude Sonnet 5 Thinking", provider: "Anthropic", thinking: true, contextWindow: 200000 },
+  { id: "claude-opus-5", name: "Claude Opus 5", provider: "Anthropic", contextWindow: 200000 },
+  { id: "claude-opus-5-thinking", name: "Claude Opus 5 Thinking", provider: "Anthropic", thinking: true, contextWindow: 200000 },
+  { id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "Anthropic", contextWindow: 200000 },
+  { id: "claude-opus-4-8-thinking", name: "Claude Opus 4.8 Thinking", provider: "Anthropic", thinking: true, contextWindow: 200000 },
+  { id: "claude-opus-4-7", name: "Claude Opus 4.7", provider: "Anthropic", contextWindow: 200000 },
+  { id: "claude-opus-4-7-thinking", name: "Claude Opus 4.7 Thinking", provider: "Anthropic", thinking: true, contextWindow: 200000 },
+  { id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic", contextWindow: 200000 },
+  { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 Thinking", provider: "Anthropic", thinking: true, contextWindow: 200000 },
+  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "Anthropic", contextWindow: 200000 },
+  { id: "claude-sonnet-4-6-thinking", name: "Claude Sonnet 4.6 Thinking", provider: "Anthropic", thinking: true, contextWindow: 200000 },
+  { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", provider: "Anthropic", contextWindow: 200000 },
+  { id: "claude-haiku-4-5-20251001-thinking", name: "Claude Haiku 4.5 Thinking", provider: "Anthropic", thinking: true, contextWindow: 200000 },
+  { id: "composer-2.5", name: "Composer 2.5", provider: "Anthropic", contextWindow: 200000 },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: "OpenAI", contextWindow: 200000 },
+  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", provider: "OpenAI", contextWindow: 200000 },
+  { id: "gpt-5.5", name: "GPT-5.5", provider: "OpenAI", contextWindow: 128000 },
+  { id: "gpt-5.4", name: "GPT-5.4", provider: "OpenAI", contextWindow: 128000 },
+  { id: "gpt-5.4-mini", name: "GPT-5.4 Mini", provider: "OpenAI", contextWindow: 128000 },
+  { id: "gpt-oss-120b-free", name: "GPT-OSS 120B", provider: "OpenAI", free: true, contextWindow: 128000 },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: "DeepSeek", contextWindow: 128000 },
+  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", provider: "DeepSeek", contextWindow: 128000 },
+  { id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash Free", provider: "DeepSeek", free: true, contextWindow: 128000 },
+  { id: "grok-4.6", name: "Grok 4.6", provider: "xAI", contextWindow: 131072 },
+  { id: "grok-4.5", name: "Grok 4.5", provider: "xAI", contextWindow: 131072 },
+  { id: "musk-4.5", name: "Musk 4.5", provider: "xAI", contextWindow: 131072 },
+  { id: "minimax-m3", name: "MiniMax M3", provider: "MiniMax", contextWindow: 128000 },
+  { id: "minimax-m2.7-free", name: "MiniMax M2.7", provider: "MiniMax", free: true, contextWindow: 128000 },
 ];
 
 function buildDefaultParams(model: ModelInfo): ModelParams {
+  // Default contextLimit to 90% of context window — auto-compression triggers at 85% of this
+  const contextLimit = Math.floor(model.contextWindow * 0.9 / 1000) * 1000;
   if (model.thinking) {
-    return { thinkingLevel: "medium", maxPerRound: 16384, contextLimit: 0 };
+    return { thinkingLevel: "medium", maxPerRound: 16384, contextLimit };
   }
-  return { temperature: 0.7, topP: 1, maxPerRound: 8192, contextLimit: 0 };
+  return { temperature: 0.7, topP: 1, maxPerRound: 8192, contextLimit };
 }
 
 export function getDefaultModelConfig(): ModelConfig {
@@ -238,7 +242,7 @@ export function ModelSelector({ currentConfig, onConfirm, onClose }: Props) {
                 <SliderParam
                   label="Context Limit"
                   min={0}
-                  max={200000}
+                  max={selectedModel.contextWindow}
                   step={1000}
                   value={paramValues.contextLimit ?? 0}
                   onChange={(v) =>
@@ -248,8 +252,8 @@ export function ModelSelector({ currentConfig, onConfirm, onClose }: Props) {
                 />
                 <div className="text-[10px] text-base-content/40 mt-0.5">
                   {(paramValues.contextLimit ?? 0) === 0
-                    ? "Auto-compression disabled"
-                    : "Auto-compress when context approaches limit"}
+                    ? "Auto-compression disabled (not recommended)"
+                    : `Auto-compress at ~${Math.round((paramValues.contextLimit ?? 0) / 1000)}k tokens`}
                 </div>
               </div>
             </div>

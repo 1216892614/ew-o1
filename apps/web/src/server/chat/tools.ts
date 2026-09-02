@@ -24,6 +24,7 @@ interface CreateAgentToolsParams {
   askResolverRef: { current: { resolve: (v: unknown) => void } | null };
   finishFlagRef: { current: boolean };
   activeNoteIds: string[];
+  groupId: string;
 }
 
 /* ── Shared helpers ─────────────────────────────────────── */
@@ -97,7 +98,7 @@ type SearchResult = {
 /* ── Tool factory ───────────────────────────────────────── */
 
 export function createAgentTools(params: CreateAgentToolsParams) {
-  const { env, notebookId, contentHashMap, askResolverRef, finishFlagRef, activeNoteIds } = params;
+  const { env, notebookId, contentHashMap, askResolverRef, finishFlagRef, activeNoteIds, groupId } = params;
   const db = env.DB;
   const drizzleDb = dbFactory(db);
 
@@ -447,6 +448,7 @@ export function createAgentTools(params: CreateAgentToolsParams) {
             source: "agent",
             sessionName: null,
             toolName: "edit_file",
+            groupId,
           });
 
           await bumpNotebookTimestamps(env.R2, drizzleDb, notebookId);
@@ -544,6 +546,7 @@ export function createAgentTools(params: CreateAgentToolsParams) {
             sessionName: null,
             toolName: "edit_file",
             metaDiff,
+            groupId,
           });
         }
 
@@ -636,6 +639,7 @@ export function createAgentTools(params: CreateAgentToolsParams) {
             toolName: "edit_content",
             beforeContent: check.content,
             afterContent: newContent,
+            groupId,
           });
         }
 

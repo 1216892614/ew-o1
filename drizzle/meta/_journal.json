@@ -28,6 +28,13 @@
       "when": 1788134400000,
       "tag": "0003_diff_snapshots",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1788220800000,
+      "tag": "0004_snapshot_groups",
+      "breakpoints": true
     }
   ]
 }

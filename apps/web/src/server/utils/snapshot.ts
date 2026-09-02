@@ -16,6 +16,7 @@ export interface RecordSnapshotParams {
   beforeContent?: string;
   afterContent?: string;
   metaDiff?: Record<string, { before: unknown; after: unknown }>;
+  groupId?: string | null;
 }
 
 export async function recordSnapshot(params: RecordSnapshotParams): Promise<string> {
@@ -66,6 +67,7 @@ export async function recordSnapshot(params: RecordSnapshotParams): Promise<stri
     afterData: null,
     diffData,
     parentSnapshotId,
+    groupId: params.groupId ?? null,
     revertTargetId: null,
     createdAt: new Date(),
   });
@@ -146,6 +148,7 @@ export async function revertToSnapshot(
     afterData: null,
     diffData: revertDiff.includes("@@") ? revertDiff : null,
     parentSnapshotId: parentSnap?.id ?? null,
+    groupId: null,
     revertTargetId: targetSnapshotId,
     createdAt: new Date(),
   });

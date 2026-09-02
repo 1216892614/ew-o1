@@ -208,6 +208,7 @@ export const notesRouter = router({
         source: "user",
         beforeContent: "",
         afterContent: "",
+        groupId: nanoid(),
       });
 
       await updateNotebookFileCount(ctx.db, input.notebookId);
@@ -330,6 +331,7 @@ export const notesRouter = router({
         action: data.content !== undefined ? "update_content" : "update_meta",
         summary: changedFields.join("、") || "更新文件",
         source: "user",
+        groupId: nanoid(),
       };
 
       if (data.content !== undefined) {
@@ -460,6 +462,7 @@ export const notesRouter = router({
           source: "user",
           beforeContent: fullNote.content ?? "",
           afterContent: "",
+          groupId: nanoid(),
         });
       }
       if (note) {

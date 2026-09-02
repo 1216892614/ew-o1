@@ -77,6 +77,7 @@ export const snapshots = sqliteTable("snapshots", {
   /** If this is a revert, which snapshot id it reverted to */
   revertTargetId: text("revert_target_id"),
   diffData: text("diff_data"),
+  groupId: text("group_id"),
   parentSnapshotId: text("parent_snapshot_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });

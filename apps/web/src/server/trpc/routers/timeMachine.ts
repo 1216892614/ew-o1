@@ -46,6 +46,7 @@ export const timeMachineRouter = router({
           sessionName: snapshots.sessionName,
           toolName: snapshots.toolName,
           revertTargetId: snapshots.revertTargetId,
+          groupId: snapshots.groupId,
           createdAt: snapshots.createdAt,
           noteName: notes.name,
         })
@@ -71,6 +72,7 @@ export const timeMachineRouter = router({
         sessionName: r.sessionName,
         toolName: r.toolName,
         revertTargetId: r.revertTargetId,
+        groupId: r.groupId ?? null,
         createdAt: r.createdAt.toISOString(),
       }));
 

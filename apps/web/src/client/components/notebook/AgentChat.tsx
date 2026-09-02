@@ -22,6 +22,7 @@ import {
   PaperPlaneRight,
   PencilSimple,
   Plus,
+  Scissors,
   Stop,
   UploadSimple,
   Wrench,
@@ -426,40 +427,13 @@ export function AgentChat({
       });
       const result = (await response.json()) as {
         success: boolean;
-        supported?: boolean;
         summary?: string;
       };
-      if (compressMode === "native" && result.supported === false) {
-        toast("当前模型不支持原生压缩，已回退到软压缩", { icon: "⚠️" });
-        setIsCompressing(true);
-        const fallbackResp = await fetch("/api/chat/compress", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: currentSessionId,
-            notebookId,
-            mode: "soft",
-            model: modelConfig.model.id,
-            leafId,
-          }),
-        });
-        const fallbackResult = (await fallbackResp.json()) as {
-          success: boolean;
-          summary?: string;
-        };
-        if (!fallbackResult.success) {
-          toast.error(fallbackResult.summary ?? "压缩失败");
-          return;
-        }
-        toast.success("对话已压缩（软压缩）");
-        await loadHistory(notebookId, currentSessionId);
-        return;
-      }
       if (!result.success) {
         toast.error(result.summary ?? "压缩失败");
         return;
       }
-      toast.success("对话已压缩");
+      toast.success(compressMode === "native" ? "对话已截断压缩" : "对话已摘要压缩");
       await loadHistory(notebookId, currentSessionId);
     } catch {
       toast.error("压缩失败");
@@ -584,7 +558,7 @@ export function AgentChat({
         "",
         "用户的指令就是授权。当用户要求修改、添加、删除、批注、重写文件内容时，直接执行，不要询问确认。",
         "所有文件编辑都有时光机（版本历史），用户可以随时回退任何改动，所以不必担心改错——大胆执行。",
-        "只有在用户意图genuinely模糊（比如"帮我整理一下"但不清楚整理哪些文件）时才用 ask 工具确认。",
+        "只有在用户意图genuinely模糊（比如「帮我整理一下」但不清楚整理哪些文件）时才用 ask 工具确认。",
         "「帮我改一下 xxx」「在第 3 段加个批注」「把标题改成 yyy」这类指令意图明确，直接 read_file → edit_content 执行。",
         "",
         "## Agent Loop 生命周期",
@@ -1303,6 +1277,13 @@ export function AgentChat({
               );
             }
             const { node } = item;
+
+            /* Compress markers: render as a system banner, skip the user-side */
+            if (node.modelProvider === "compress") {
+              if (node.role === "user") return null; // skip user part, banner shown on assistant
+              return <CompressBanner key={node.id} node={node} />;
+            }
+
             if (node.role === "user") {
               return (
                 <UserBubble
@@ -1545,6 +1526,37 @@ function VersionNavigator({
       >
         <CaretRight size={12} />
       </button>
+    </div>
+  );
+}
+
+/* ── Compress banner (system event) ─────────────────────── */
+
+function CompressBanner({ node }: { node: AssistantNode }) {
+  const [expanded, setExpanded] = useState(false);
+  const isNative = node.content === "好的，我了解上下文。";
+
+  return (
+    <div className="flex justify-center">
+      <div className="flex flex-col items-center gap-1 max-w-[85%]">
+        <button
+          type="button"
+          className="flex items-center gap-1.5 text-xs text-base-content/40 bg-base-200 rounded-full px-3 py-1 hover:bg-base-300 transition-colors"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <Scissors size={13} weight="duotone" />
+          <span>{isNative ? "对话已截断压缩" : "对话已摘要压缩"}</span>
+          <CaretDown
+            size={10}
+            className={`transition-transform ${expanded ? "rotate-180" : ""}`}
+          />
+        </button>
+        {expanded && (
+          <div className="bg-base-200 rounded-lg border border-base-300 px-3 py-2 text-xs text-base-content/50 whitespace-pre-wrap w-full">
+            {node.content}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

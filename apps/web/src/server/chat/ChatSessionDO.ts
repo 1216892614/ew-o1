@@ -296,6 +296,7 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
         set current(v) { self.finishCalled = v; },
       },
       activeNoteIds,
+      groupId: nanoid(),
     });
 
     /* Filter out client-disabled tools (e.g. "ask" when user toggles it off) */
@@ -363,15 +364,11 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Compress conversation history.
-   * "native" → check if provider supports prompt caching (most don't). Returns { supported: false } to fall back.
-   * "soft"   → summarize entire conversation into a single system-summary + user-ask pair, delete old nodes.
+   * Compress conversation history (manual button).
+   * "native" → sliding window: keep first 2 + last N nodes, delete middle.
+   * "soft"   → summarize entire conversation into a summary pair, delete old nodes.
    */
   async compress(mode: "native" | "soft", model: string, leafId: string | null): Promise<{ success: boolean; supported?: boolean; summary?: string }> {
-    if (mode === "native") {
-      return { success: false, supported: false };
-    }
-
     const allRows = this.ctx.storage.sql
       .exec<NodeRow>(
         `SELECT id, role, parent_id as parentId, content, timeline, model, model_name as modelName,
@@ -386,6 +383,82 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
       return { success: false, summary: "对话太短，无需压缩" };
     }
 
+    if (mode === "native") {
+      return this.compressNodesNative(path);
+    }
+    return this.compressNodesSoft(path, model);
+  }
+
+  /** Native manual compress: keep first 2 + last 6 nodes, delete middle. */
+  private async compressNodesNative(path: ChatNode[]): Promise<{ success: boolean; summary?: string }> {
+    const headCount = Math.min(2, path.length);
+    const tailCount = Math.min(6, path.length - headCount);
+    const dropStart = headCount;
+    const dropEnd = path.length - tailCount;
+
+    if (dropEnd <= dropStart) {
+      return { success: false, summary: "对话太短，无需压缩" };
+    }
+
+    const droppedNodes = path.slice(dropStart, dropEnd);
+    const droppedCount = droppedNodes.length;
+
+    // Delete the middle nodes
+    for (const n of droppedNodes) {
+      this.ctx.storage.sql.exec("DELETE FROM nodes WHERE id = ?", n.id);
+    }
+
+    // Insert a truncation marker pair between head and tail
+    const now = Date.now();
+    const markerId = nanoid();
+    const markerReplyId = nanoid();
+    const headLast = path[headCount - 1];
+    const tailFirst = path[dropEnd];
+
+    this.ctx.storage.sql.exec(
+      `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      markerId,
+      "user",
+      headLast.id,
+      `[对话历史已截断：省略了中间 ${droppedCount} 条消息]`,
+      null,
+      null,
+      "system",
+      "compress",
+      null,
+      null,
+      now,
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT INTO nodes (id, role, parent_id, content, timeline, model, model_name, model_provider, model_params, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      markerReplyId,
+      "assistant",
+      markerId,
+      "好的，我了解上下文。",
+      JSON.stringify([{ kind: "text", content: "好的，我了解上下文。", streaming: false }]),
+      null,
+      "system",
+      "compress",
+      null,
+      "done",
+      now + 1,
+    );
+
+    // Re-parent the tail's first node to the marker reply
+    this.ctx.storage.sql.exec(
+      "UPDATE nodes SET parent_id = ? WHERE id = ?",
+      markerReplyId,
+      tailFirst.id,
+    );
+
+    await this.flushToR2();
+    return { success: true, summary: `截断了 ${droppedCount} 条中间消息` };
+  }
+
+  /** Soft manual compress: LLM summarization of old messages. */
+  private async compressNodesSoft(path: ChatNode[], model: string): Promise<{ success: boolean; summary?: string }> {
     const conversationText = path
       .map((n) => `[${n.role}]: ${n.content.slice(0, 2000)}`)
       .join("\n\n");
@@ -437,7 +510,6 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
     );
 
     await this.flushToR2();
-
     return { success: true, summary: summaryContent.slice(0, 200) };
   }
 
@@ -495,22 +567,89 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
 
   /**
    * Compress runningMessages in-place.
-   * "native" → currently unsupported, returns "unsupported" so caller can warn + fallback.
-   * "soft"   → LLM summarization, keeps last 2 messages.
-   * Returns "ok" | "unsupported" | "failed".
+   *
+   * "native" → Sliding window: keep first 2 messages (session opener) + as many
+   *   recent messages as fit within ~50% of contextLimit. Middle messages are
+   *   dropped with a short "[N messages truncated]" marker. Zero LLM calls.
+   *
+   * "soft" → LLM summarization of old messages into a summary, keeps last 2.
+   *
+   * Returns "ok" | "failed".
    */
   private async compressMessages(
     runningMessages: { role: "user" | "assistant"; content: string }[],
     model: string,
     mode: "native" | "soft",
-  ): Promise<"ok" | "unsupported" | "failed"> {
-    if (mode === "native") {
-      return "unsupported";
-    }
-
+    contextLimit: number,
+  ): Promise<"ok" | "failed"> {
     if (runningMessages.length < 4) return "failed";
 
-    const keepCount = Math.min(2, runningMessages.length);
+    if (mode === "native") {
+      return this.compressNative(runningMessages, contextLimit);
+    }
+    return this.compressSoft(runningMessages, model);
+  }
+
+  /**
+   * Native compression: sliding window truncation.
+   * Keep the first user+assistant pair (establishes the session topic),
+   * then keep as many recent messages as fit within half the context budget.
+   * A "[truncated]" marker bridges the gap.
+   */
+  private compressNative(
+    runningMessages: { role: "user" | "assistant"; content: string }[],
+    contextLimit: number,
+  ): "ok" | "failed" {
+    // Budget: target 50% of contextLimit for messages (rest for system prompts + response)
+    const tokenBudget = Math.max(contextLimit * 0.5, 8000);
+
+    // Keep first 2 messages (session opener)
+    const headCount = Math.min(2, runningMessages.length);
+    const head = runningMessages.slice(0, headCount);
+    const rest = runningMessages.slice(headCount);
+
+    if (rest.length < 2) return "failed"; // nothing meaningful to drop
+
+    // Estimate tokens for head
+    let headTokens = 0;
+    for (const m of head) headTokens += Math.ceil(m.content.length / 3.5);
+
+    // Walk backwards from tail, accumulating messages that fit
+    const tailBudget = tokenBudget - headTokens;
+    let tailTokens = 0;
+    let tailStart = rest.length;
+    for (let i = rest.length - 1; i >= 0; i--) {
+      const msgTokens = Math.ceil(rest[i].content.length / 3.5);
+      if (tailTokens + msgTokens > tailBudget) break;
+      tailTokens += msgTokens;
+      tailStart = i;
+    }
+
+    // Ensure we keep at least the last 2 messages
+    tailStart = Math.min(tailStart, rest.length - 2);
+    const droppedCount = tailStart;
+    if (droppedCount < 1) return "failed"; // nothing to drop
+
+    const tail = rest.slice(tailStart);
+
+    // Rebuild runningMessages in-place
+    const truncationMarker = {
+      role: "user" as const,
+      content: `[对话历史已截断：省略了中间 ${droppedCount} 条消息。以上是对话开头，以下是最近的对话。]`,
+    };
+
+    runningMessages.length = 0;
+    runningMessages.push(...head, truncationMarker, { role: "assistant", content: "好的，我了解上下文。" }, ...tail);
+    return "ok";
+  }
+
+  /** Soft compression: LLM summarization, keeps last 4 messages. */
+  private async compressSoft(
+    runningMessages: { role: "user" | "assistant"; content: string }[],
+    model: string,
+  ): Promise<"ok" | "failed"> {
+    // Keep more tail messages for better continuity
+    const keepCount = Math.min(4, runningMessages.length - 2);
     const toCompress = runningMessages.slice(0, runningMessages.length - keepCount);
     const tail = runningMessages.slice(runningMessages.length - keepCount);
 
@@ -596,14 +735,9 @@ export class ChatSessionDO extends DurableObject<Cloudflare.Env> {
         }
       }
 
-      /* ── Auto-compress helper: respect mode, native→soft fallback with warning ── */
+      /* ── Auto-compress helper ── */
       const tryCompress = async (): Promise<{ ok: boolean; warning?: string }> => {
-        let result = await this.compressMessages(runningMessages, model, compressMode);
-        if (result === "unsupported") {
-          result = await this.compressMessages(runningMessages, model, "soft");
-          if (result === "ok") return { ok: true, warning: "当前模型不支持原生压缩，已回退到软压缩" };
-          return { ok: false, warning: "当前模型不支持原生压缩，软压缩也失败了" };
-        }
+        const result = await this.compressMessages(runningMessages, model, compressMode, contextLimit);
         return { ok: result === "ok" };
       };
 
